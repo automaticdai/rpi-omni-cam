@@ -10,7 +10,7 @@ from omnicam.app import App, SimSystem
 from omnicam.camera import SimCamera
 from omnicam.config import Settings
 from omnicam.screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
-                             MenuView, PlaybackView, ReviewView)
+                             MenuView, PlaybackView, ReviewView, WelcomeView)
 
 
 class FakeDisplay:
@@ -55,7 +55,7 @@ class Rig:
         self.settings = Settings(photo_dir=str(tmp_path / "photos"), screen_off=0, **settings)
         self.app = App(SimCamera(), self.display, self.settings,
                        settings_path=tmp_path / "settings.json", require_mount=False,
-                       system=SimSystem(), clock=self.clock)
+                       system=SimSystem(), clock=self.clock, start_on=True)
         self.app.start()
         self.app.step()
 
@@ -241,7 +241,7 @@ def test_ram_fallback_saves_to_ram_and_refuses_when_full(tmp_path, monkeypatch):
     clock, display = Clock(), FakeDisplay()
     s = Settings(photo_dir=str(tmp_path / "not-mounted"), screen_off=0)
     app = App(SimCamera(), display, s, settings_path=tmp_path / "s.json",
-              require_mount=True, system=SimSystem(), clock=clock)
+              require_mount=True, system=SimSystem(), clock=clock, start_on=True)
     assert app.storage.in_ram
     app.start()
     app._avg_jpeg = 50_000
@@ -288,7 +288,7 @@ def test_usb_export_refused_when_photos_are_in_ram(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "FALLBACK_DIR", tmp_path / "ram")
     app = App(SimCamera(), FakeDisplay(), Settings(photo_dir=str(tmp_path / "nope"), screen_off=0),
               settings_path=tmp_path / "s.json", require_mount=True, system=SimSystem(),
-              clock=Clock())
+              clock=Clock(), start_on=True)
     app.run_action("usb_export")
     assert isinstance(app.screen, InfoView) and not app.busy
 
@@ -313,3 +313,60 @@ def test_screen_off_and_wake(tmp_path, monkeypatch):
     assert not rig.app.screen_on and rig.display.backlight == 0
     rig.press("X")          # wakes, does not take a photo
     assert rig.app.screen_on and not rig.app.busy
+
+
+class CountingCamera(SimCamera):
+    def __init__(self):
+        super().__init__()
+        self.starts = self.stops = 0
+
+    def start(self):
+        self.starts += 1
+
+    def stop(self):
+        self.stops += 1
+
+
+def test_starts_off_and_y_held_3s_turns_on_then_off(tmp_path, monkeypatch):
+    monkeypatch.setattr("omnicam.storage.FALLBACK_DIR", tmp_path / "fallback")
+    monkeypatch.setattr("omnicam.app.time.sleep", lambda s: None)
+    clock, display, cam = Clock(), FakeDisplay(), CountingCamera()
+    app = App(cam, display, Settings(photo_dir=str(tmp_path / "p"), screen_off=0),
+              settings_path=tmp_path / "s.json", require_mount=False, system=SimSystem(),
+              clock=clock)
+    app.start()
+    app.step()
+    assert not app.powered and display.backlight == 0 and cam.starts == 0
+    assert display.frames == []                       # nothing drawn while off
+
+    def hold_y(seconds):
+        display.held = {"Y"}
+        t_end = clock.t + seconds
+        while clock.t < t_end:
+            clock.t += 0.1
+            app.step()
+        display.held = set()
+        clock.t += 0.05
+        app.step()
+
+    hold_y(1.5)                                       # too short: stays off
+    assert not app.powered
+    hold_y(3.2)
+    assert app.powered and cam.starts == 1 and display.backlight > 0
+    assert isinstance(app.screen, WelcomeView)
+    clock.t += 2.5
+    app.step()
+    assert isinstance(app.screen, LiveView)           # welcome times out
+    live = app.screen
+    before = live.selected
+    hold_y(3.2)                                       # hold Y: no param switch, turns off
+    assert not app.powered and cam.stops == 1 and display.backlight == 0
+    assert live.selected == before
+
+
+def test_power_off_refused_during_usb_export(rig):
+    rig.app.start_export()
+    rig.finish_job()
+    rig.app.power_off()
+    assert rig.app.powered
+    assert "USB export" in rig.app._toast[0]

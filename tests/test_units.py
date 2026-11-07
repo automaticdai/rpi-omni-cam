@@ -4,7 +4,7 @@ import pytest
 from PIL import Image
 
 from omnicam import filters
-from omnicam.buttons import LONG, PRESS, REPEAT, ButtonEvent, ButtonTracker
+from omnicam.buttons import LONG, POWER, PRESS, REPEAT, ButtonEvent, ButtonTracker
 from omnicam.camera import PREVIEW_MAX_EXPOSURE_S, preview_exposure, preview_size
 from omnicam.config import Settings
 from omnicam.exposure import EV_STEPS, format_shutter, iso_steps, shutter_steps, step
@@ -26,6 +26,17 @@ def test_long_press_fires_once_then_repeats_and_no_press_on_release():
     assert t.update({"B"}, 0.8) == []
     assert t.update({"B"}, 0.87) == [ButtonEvent("B", REPEAT)]
     assert t.update(set(), 1.0) == []
+
+
+def test_power_event_only_for_y_after_3s():
+    t = ButtonTracker()
+    t.update({"Y", "A"}, 0.0)
+    events = []
+    for i in range(1, 32):
+        events += t.update({"Y", "A"}, i * 0.1)
+    assert events.count(ButtonEvent("Y", POWER)) == 1
+    assert ButtonEvent("A", POWER) not in events
+    assert t.update(set(), 3.3) == []    # no short press after a hold
 
 
 # ---- exposure ----------------------------------------------------------
@@ -159,3 +170,20 @@ def test_ram_storage_is_capped_by_budget_and_reserve(tmp_path, monkeypatch):
     assert st.free_bytes() == 10_000
     monkeypatch.setattr(storage, "mem_available", lambda: 0)
     assert st.free_bytes() == 0
+
+
+def test_sysinfo_reads_pi_files(monkeypatch):
+    from omnicam import sysinfo
+
+    files = {
+        "/proc/device-tree/model": "Raspberry Pi Zero 2 W Rev 1.0\0",
+        "/proc/device-tree/compatible": "raspberrypi,model-zero-2-w\0brcm,bcm2837\0",
+        "/proc/cpuinfo": "processor\t: 0\nCPU implementer\t: 0x41\nCPU part\t: 0xd03\n",
+        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq": "1000000\n",
+        "/proc/meminfo": "MemTotal:         425108 kB\nMemFree: 1 kB\n",
+    }
+    monkeypatch.setattr(sysinfo, "_read", lambda path: files[path].replace("\0", " ").strip())
+    monkeypatch.setattr(sysinfo.os, "cpu_count", lambda: 4)
+    assert sysinfo.board_model() == "Raspberry Pi Zero 2 W Rev 1.0"
+    assert sysinfo.processor() == "BCM2837, 4× Cortex-A53 @ 1.0 GHz"
+    assert sysinfo.ram() == "512 MB (415 MB usable)"

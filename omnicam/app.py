@@ -14,13 +14,13 @@ from typing import Any, Callable, Optional
 
 from PIL import Image
 
-from . import __version__, exif, filters, ui
-from .buttons import ButtonTracker
+from . import __version__, exif, filters, sysinfo, ui
+from .buttons import LONG, POWER, ButtonTracker
 from .camera import FrameMeta
 from .config import DEFAULT_CONFIG_PATH, Settings
 from .exposure import EV_STEPS, format_shutter, iso_steps, shutter_steps, step
 from .screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
-                      MenuView, ReviewView, Screen)
+                      MenuView, ReviewView, Screen, WelcomeView)
 from .storage import PHOTO_IMAGE, Storage
 
 SAVE_DEBOUNCE_S = 2.0
@@ -140,8 +140,11 @@ def read_temperature() -> Optional[float]:
 class App:
     def __init__(self, camera, display, settings: Settings, *,
                  settings_path: Path = DEFAULT_CONFIG_PATH, require_mount: bool = True,
-                 system: Optional[System] = None, clock: Callable[[], float] = time.monotonic):
+                 system: Optional[System] = None, clock: Callable[[], float] = time.monotonic,
+                 start_on: bool = False):
         self.camera, self.display, self.s = camera, display, settings
+        # Standby: the camera starts off; holding Y for 3 s turns it on/off.
+        self.powered = start_on
         self.settings_path = settings_path
         self.system = system or System()
         self.now = clock
@@ -171,9 +174,14 @@ class App:
 
     # ---- lifecycle ----------------------------------------------------
     def start(self) -> None:
-        self.camera.start()
-        self.camera.apply(self.s)
-        self.display.set_backlight(self.s.brightness / 100)
+        if self.powered:
+            self.camera.start()
+            self.camera.apply(self.s)
+            self.display.set_backlight(self.s.brightness / 100)
+        else:
+            self.display.set_backlight(0)
+            self.display.set_led(0, 0, 0)
+            log.info("standby: hold Y for 3 s to turn on")
         i = self.camera.info
         log.info("omnicam %s: camera %s %s, max exposure %.2fs, max gain %.1f, storage %s (%s)",
                  __version__, i.model, i.resolution, i.max_exposure_s, i.max_gain,
@@ -201,15 +209,23 @@ class App:
     def step(self) -> None:
         now = self.now()
         pressed = self.display.pressed()
+        if not self.powered:
+            self._step_standby(pressed, now)
+            return
         if not self.screen_on and pressed:
             self._wake()
             self._swallow = True
         events = self.buttons.update(pressed, now)
         if self._swallow:
-            events = []
+            events = [e for e in events if e.kind == POWER]
             if not self.buttons.any_down():
                 self._swallow = False
         for ev in events:
+            if ev.kind == POWER:
+                self.power_off()
+                return
+            if ev.button == "Y" and ev.kind == LONG:
+                self.toast("Keep holding Y to turn off", ui.ACCENT, 2.4)
             self._last_activity = now
             log.info("button %s %s on %s", ev.button, ev.kind, type(self.screen).__name__)
             self.screen.on_button(ev)
@@ -229,6 +245,60 @@ class App:
         frame = self.screen.render()
         frame = self._draw_toast(frame, now)
         self.display.show(frame)
+
+    # ---- standby / power -------------------------------------------------
+    def _step_standby(self, pressed: set, now: float) -> None:
+        for ev in self.buttons.update(pressed, now):
+            if ev.kind == POWER:
+                self.power_on()
+                return
+            if ev.button == "Y" and ev.kind == LONG:
+                self.display.set_led(0.15, 0.15, 0.15)  # "keep holding" glow
+        if not self.buttons.any_down():
+            self.display.set_led(0, 0, 0)
+        self._housekeeping(now)
+        time.sleep(0.05)
+
+    def power_on(self) -> None:
+        log.info("power on")
+        self.display.set_led(0, 0, 0)
+        self.camera.start()
+        self.camera.apply(self.s)
+        self.powered = True
+        self.screen_on = True
+        self._last_activity = self.now()
+        self.display.set_backlight(self.s.brightness / 100)
+        self.reload_storage()
+        self.open(WelcomeView(self))
+        if self.storage.in_ram:
+            self.toast("No photo storage: saving to RAM", ui.RED, 4)
+
+    def power_off(self) -> None:
+        if isinstance(self.screen, ExportView):
+            self.toast("Stop USB export first", ui.RED, 2.5)
+            return
+        if self.busy:
+            self.toast("Busy - try again", ui.RED, 2)
+            return
+        log.info("power off")
+        if self.timelapse:
+            self.stop_timelapse()
+        img, d = ui.panel_screen("omnicam")
+        ui.centered(d, 105, "Turning off…", ui.font(18, "bold"))
+        self.display.show(img)
+        time.sleep(0.8)
+        self.camera.stop()
+        self.display.set_backlight(0)
+        self.display.set_led(0, 0, 0)
+        self._led_until = None
+        self._toast = None
+        self.preview_raw = self.preview_filtered = self.preview_meta = None
+        self.meter_ev = None
+        self.powered = False
+        self.back_to_live()
+        if self._dirty_at is not None:
+            self._dirty_at = None
+            self.s.save(self.settings_path)
 
     def _grab_preview(self) -> None:
         img, meta = self.camera.preview()
@@ -464,6 +534,9 @@ class App:
             mp = i.resolution[0] * i.resolution[1] / 1e6
             shutters = shutter_steps(i.max_exposure_s)
             lines = [f"App: omnicam {__version__}",
+                     f"Model: {sysinfo.board_model()}",
+                     f"CPU: {sysinfo.processor()}",
+                     f"RAM: {sysinfo.ram()}",
                      f"Sensor: {i.model}",
                      f"Resolution: {i.resolution[0]}×{i.resolution[1]} ({mp:.1f} MP)",
                      f"Shutter: {format_shutter(shutters[0])} – {format_shutter(shutters[-1])}",

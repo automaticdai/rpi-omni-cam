@@ -115,6 +115,9 @@ class PiCamera:
         self.cam.configure(self._preview_cfg)
         self.cam.start()
 
+    def stop(self) -> None:
+        self.cam.stop()
+
     def close(self) -> None:
         try:
             self.cam.stop()
@@ -215,6 +218,9 @@ class SimCamera:
         self._t0 = time.monotonic()
 
     def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
         pass
 
     def close(self) -> None:

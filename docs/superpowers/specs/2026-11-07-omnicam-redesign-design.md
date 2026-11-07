@@ -28,6 +28,12 @@ keyboard a/b/x/y, synthetic camera) allows development off the Pi.
 
 ## Controls (decided: option A, "pick a setting, then nudge it")
 
+Power (added after hardware testing, decided): the camera starts in standby
+when the Pi boots (backlight and LED off, camera stopped). Holding **Y** for
+3 s anywhere turns it on (welcome screen with name and version, ~2 s, any
+button skips) or off (refused during USB export or while saving; a running
+timelapse is stopped). Menu › Shut down still powers off the Pi.
+
 Live view:
 - **X** short: take photo (honours self-timer). **X** hold: start/stop timelapse.
 - **Y** short: move highlight between the values the current mode lets you set.

@@ -24,6 +24,11 @@ Zero 2 W, a Raspberry Pi camera and a Pimoroni Display HAT Mini.
 
 ## Controls
 
+**On / off:** the camera starts **off** when the Pi boots (screen dark, camera
+stopped). **Hold Y for 3 seconds** to turn it on — a welcome screen shows, then
+live view. Hold Y for 3 seconds again to turn it off (not possible during USB
+export). This is a standby; **Menu › System › Shut down** powers the Pi off.
+
 ```
         ┌──────────────────────────────┐
    A ── │                              │ ── X   SHUTTER  (hold: start/stop timelapse)
@@ -131,6 +136,7 @@ Settings persist in `/var/lib/omnicam/settings.json`.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m omnicam --sim --photo-dir /tmp/omnicam-photos   # keys a/b/x/y, Esc quits
+# starts off: hold y for 3 s to turn it on
 .venv/bin/python -m pytest
 ```
 

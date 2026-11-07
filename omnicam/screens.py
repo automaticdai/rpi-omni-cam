@@ -410,6 +410,41 @@ class InfoView(Screen):
         return img
 
 
+class WelcomeView(Screen):
+    """Shown for a moment after turning on."""
+
+    SECONDS = 2.0
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.until = app.now() + self.SECONDS
+
+    def on_button(self, ev: ButtonEvent) -> None:
+        if ev.kind == PRESS:
+            self.app.back_to_live()
+
+    def tick(self, now: float) -> None:
+        if now >= self.until:
+            self.app.back_to_live()
+
+    def render(self) -> Image.Image:
+        from . import __version__
+
+        img = Image.new("RGB", (ui.W, ui.H), ui.BG)
+        d = ImageDraw.Draw(img)
+        # camera glyph
+        cx, cy = ui.W // 2, 82
+        d.rounded_rectangle([cx - 46, cy - 26, cx + 46, cy + 30], 8, outline=ui.WHITE, width=3)
+        d.rectangle([cx - 18, cy - 36, cx + 18, cy - 26], fill=ui.WHITE)
+        d.ellipse([cx - 19, cy - 17, cx + 19, cy + 21], outline=ui.ACCENT, width=4)
+        d.ellipse([cx - 7, cy - 5, cx + 7, cy + 9], fill=ui.ACCENT)
+        d.ellipse([cx + 30, cy - 18, cx + 37, cy - 11], fill=ui.RED)
+        ui.centered(d, 128, "omnicam", ui.font(34, "bold"), ui.WHITE)
+        ui.centered(d, 172, f"version {__version__}", ui.font(13), ui.GREY)
+        ui.centered(d, 210, "Hold Y for 3 s to turn off", ui.font(11), ui.GREY)
+        return img
+
+
 class ExportView(Screen):
     """USB export: the photo storage is a USB drive on the connected computer."""
 
