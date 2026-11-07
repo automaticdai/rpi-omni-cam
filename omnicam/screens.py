@@ -687,12 +687,17 @@ class InfoView(Screen):
 
     def render(self) -> Image.Image:
         img, d = ui.panel_screen(self.title)
-        f = ui.font(14)
-        y = 38
-        for line in self.lines:
-            for part in ui.wrap(d, line, f, ui.W - 24) or [""]:
-                d.text((12, y), part, font=f, fill=ui.WHITE)
-                y += 21
+        top, bottom = 34, ui.H - 20
+        # Use the largest font whose wrapped lines fit between title and hints.
+        for size, step in ((14, 21), (13, 19), (12, 17), (11, 15), (10, 13)):
+            f = ui.font(size)
+            parts = [p for line in self.lines for p in (ui.wrap(d, line, f, ui.W - 24) or [""])]
+            if top + len(parts) * step <= bottom:
+                break
+        y = top
+        for part in parts:
+            d.text((12, y), part, font=f, fill=ui.WHITE)
+            y += step
         ui.hints(d, "", "X back")
         return img
 

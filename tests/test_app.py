@@ -609,3 +609,12 @@ def test_holding_y_on_delete_prompt_does_not_power_off(rig):
     rig.display.held = set()
     rig.tick(0.05)
     assert rig.app.powered and isinstance(rig.app.screen, ConfirmView)
+
+
+def test_info_screen_fits_long_text(rig):
+    lines = [f"Line {i}: some information about the camera" for i in range(10)]
+    view = InfoView(rig.app, "Info", lines)
+    img = view.render()
+    # the last line must be drawn above the hint bar (rows 222+ are the bar)
+    last = img.crop((0, 180, 320, 221)).convert("L")    # 10th line, above the hint bar
+    assert last.getextrema()[1] > 150
