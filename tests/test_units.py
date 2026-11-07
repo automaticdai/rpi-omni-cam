@@ -261,3 +261,11 @@ def test_picamera_zoom_crop_is_centred_on_measured_full_view():
     assert cam._crop() == (820, 616, 1640, 1232)
     cam._zoom = 4
     assert cam._crop() == (1230, 924, 820, 616)
+
+
+def test_edit_arrows_know_the_ends():
+    from omnicam.menu import MODE
+    from omnicam.screens import _at_ends
+    assert _at_ends(MODE, "P") == (True, False)
+    assert _at_ends(MODE, "A") == (False, False)
+    assert _at_ends(MODE, "M") == (False, True)

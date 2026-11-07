@@ -265,6 +265,13 @@ class ReviewView(Screen):
 
 
 # ---------------------------------------------------------------------------
+def _at_ends(choice: Choice, value) -> tuple[bool, bool]:
+    """(no previous option, no next option) for the current value."""
+    values = [v for v, _ in choice.options]
+    i = values.index(value) if value in values else 0
+    return i == 0, i == len(values) - 1
+
+
 def _step_option(choice: Choice, value, direction: int):
     """Next/previous option value, stopping at the ends."""
     values = [v for v, _ in choice.options]
@@ -426,8 +433,12 @@ class MenuView(Screen):
             if sel and self.editing is item:
                 d.rounded_rectangle([4, y, ui.W - 4, y + row_h - 3], 4, outline=ui.ACCENT, width=2)
                 d.text((12, y + 3), label, font=f, fill=ui.WHITE)
-                text = f"◀ {value} ▶"
-                d.text((ui.W - 14 - ui.text_w(d, text, fv), y + 4), text, font=fv, fill=ui.ACCENT)
+                first, last = _at_ends(item, getattr(self.app.s, item.key))
+                x = ui.W - 14
+                for part, col in (("▶", ui.GREY if last else ui.ACCENT), (f" {value} ", ui.ACCENT),
+                                  ("◀", ui.GREY if first else ui.ACCENT)):
+                    x -= ui.text_w(d, part, fv)
+                    d.text((x, y + 4), part, font=fv, fill=col)
                 continue
             if sel:
                 d.rounded_rectangle([4, y, ui.W - 4, y + row_h - 3], 4, fill=ui.ACCENT)
@@ -536,8 +547,10 @@ class QuickMenuView(Screen):
             d.text((x0 + (x1 - x0 - ui.text_w(d, value, fv)) / 2, y0 + 23), value, font=fv, fill=vc)
             if sel and self.editing:
                 fa = ui.font(9, "bold")
-                d.text((x0 + 3, y0 + 26), "◀", font=fa, fill=ui.ACCENT)
-                d.text((x1 - 3 - ui.text_w(d, "▶", fa), y0 + 26), "▶", font=fa, fill=ui.ACCENT)
+                first, last = _at_ends(c, getattr(self.app.s, c.key))
+                d.text((x0 + 3, y0 + 26), "◀", font=fa, fill=ui.GREY if first else ui.ACCENT)
+                d.text((x1 - 3 - ui.text_w(d, "▶", fa), y0 + 26), "▶", font=fa,
+                       fill=ui.GREY if last else ui.ACCENT)
         hint = ("A ◀  B ▶   Y keep   X cancel" if self.editing
                 else "A/B move   Y change   X close   hold A: menu")
         ui.centered(d, ui.H - 15, hint, ui.font(10, "bold"), ui.GREY)
