@@ -48,6 +48,24 @@ class HatDisplay:
     def close(self) -> None:
         self.set_led(0, 0, 0)
         self.set_backlight(0)
+        # Release the PWM objects while the GPIO chip is still open. Otherwise
+        # displayhatmini's GPIO.cleanup() runs first and each PWM.__del__ then
+        # fails on the closed chip (rpi-lgpio), spamming tracebacks at exit.
+        for attr in ("led_r_pwm", "led_g_pwm", "led_b_pwm", "backlight_pwm"):
+            pwm = getattr(self._hat, attr, None)
+            if pwm is not None:
+                try:
+                    pwm.stop()
+                except Exception:
+                    pass
+                setattr(self._hat, attr, None)
+            del pwm
+        try:
+            import RPi.GPIO as GPIO
+
+            GPIO.cleanup()
+        except Exception:
+            pass
 
 
 class SimDisplay:

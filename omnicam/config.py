@@ -23,8 +23,19 @@ class Settings:
     iso: int = 200
     ev: float = 0.0
     wb: str = "auto"
+    metering: str = "centre"  # centre | spot | matrix
+    drive: str = "single"  # single | burst5 | burst10 | bracket3_1 | bracket3_2 | bracket5_1
+    # Focus (autofocus cameras only)
+    af_mode: str = "continuous"  # continuous | single | manual
+    lens_position: float = 1.0  # dioptres (1/m); 0 = infinity
     # Image
     filter: str = "none"
+    sharpness: str = "normal"  # low | normal | high
+    contrast: str = "normal"
+    saturation: str = "normal"
+    noise_reduction: str = "hq"  # off | fast | hq
+    image_size: str = "L"  # L | M | S
+    aspect: str = "native"  # native (sensor) | 4:3 | 3:2 | 16:9 | 1:1
     jpeg_quality: int = 90
     save_raw: bool = False
     self_timer: int = 0  # seconds, 0 = off
@@ -33,10 +44,15 @@ class Settings:
     tl_count: int = 0  # 0 = unlimited
     tl_lock_exposure: bool = True
     # Display
-    grid: bool = False
+    grid: str = "off"  # off | thirds | diagonal (thirds + diagonals)
     histogram: bool = False
+    peaking: str = "off"  # off | red | yellow | blue
+    zebras: bool = False
     brightness: int = 100  # percent
     screen_off: int = 60  # seconds, 0 = never
+    # Controls
+    fn_button: str = "playback"  # B press in live view, see menu.FN_ACTIONS
+    fn_button_long: str = "magnify"  # B hold (0.7 s) in live view; "none" = nothing
     # Storage
     photo_dir: str = "/media/photos"
 
@@ -63,6 +79,10 @@ class Settings:
         settings.shutter = min(settings.shutter, MAX_SHUTTER_S)
         if not settings.iso:
             settings.iso = defaults.iso
+        if isinstance(settings.grid, bool):  # pre-0.4: grid was on/off
+            settings.grid = "thirds" if settings.grid else "off"
+        if settings.grid not in ("off", "thirds", "diagonal"):
+            settings.grid = defaults.grid
         return settings
 
     @property

@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Optional, Sequence
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 W, H = 320, 240
 ACCENT = (245, 196, 0)
@@ -62,10 +62,15 @@ def flatten(base: Image.Image, layer: Image.Image) -> Image.Image:
     return Image.alpha_composite(base.convert("RGBA"), layer).convert("RGB")
 
 
-def grid(d: ImageDraw.ImageDraw) -> None:
+def grid(d: ImageDraw.ImageDraw, diagonal: bool = False) -> None:
+    """Rule-of-thirds lines, optionally with corner-to-corner diagonals."""
+    col = (255, 255, 255, 90)
     for i in (1, 2):
-        d.line([(W * i // 3, 0), (W * i // 3, H)], fill=(255, 255, 255, 90))
-        d.line([(0, H * i // 3), (W, H * i // 3)], fill=(255, 255, 255, 90))
+        d.line([(W * i // 3, 0), (W * i // 3, H)], fill=col)
+        d.line([(0, H * i // 3), (W, H * i // 3)], fill=col)
+    if diagonal:
+        d.line([(0, 0), (W, H)], fill=col)
+        d.line([(0, H), (W, 0)], fill=col)
 
 
 def histogram(d: ImageDraw.ImageDraw, img: Image.Image, box=(W - 74, 26, W - 6, 62)) -> None:
@@ -102,14 +107,132 @@ def meter(d: ImageDraw.ImageDraw, ev: float, y: int) -> None:
     d.polygon([(mx - 4, y + 15), (mx + 4, y + 15), (mx, y + 10)], fill=col)
 
 
-def mean_ev(img: Image.Image) -> float:
-    """Centre-weighted mean linear luminance of an sRGB image, as EV from 18 % grey."""
+def mean_ev(img: Image.Image, metering: str = "centre") -> float:
+    """Mean linear luminance of an sRGB image as EV from 18 % grey.
+
+    metering: centre (centre-weighted), spot (small centre area) or matrix (whole frame).
+    """
     a = np.asarray(img.convert("L").resize((64, 48)), dtype=np.float32) / 255.0
     lin = np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
-    yy, xx = np.mgrid[0:48, 0:64]
-    w = np.exp(-(((xx - 32) / 24) ** 2 + ((yy - 24) / 18) ** 2))
-    m = float((lin * w).sum() / w.sum())
+    if metering == "matrix":
+        m = float(lin.mean())
+    elif metering == "spot":
+        m = float(lin[21:27, 29:35].mean())  # ~10 % of the frame width
+    else:
+        yy, xx = np.mgrid[0:48, 0:64]
+        w = np.exp(-(((xx - 32) / 24) ** 2 + ((yy - 24) / 18) ** 2))
+        m = float((lin * w).sum() / w.sum())
     return float(np.log2(max(m, 1e-4) / 0.18))
+
+
+PEAKING_COLOURS = {"red": (255, 40, 40), "yellow": (255, 230, 0), "blue": (60, 140, 255)}
+
+
+def peaking(img: Image.Image, colour: str, threshold: int = 48) -> Image.Image:
+    """RGBA overlay colouring in-focus (high-contrast) edges."""
+    edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
+    mask = edges.point(lambda v: 255 if v > threshold else 0)
+    # FIND_EDGES leaves the 1-px border unfiltered: blank it so the frame edge isn't "in focus".
+    inner = Image.new("L", img.size, 0)
+    inner.paste(mask.crop((1, 1, img.width - 1, img.height - 1)), (1, 1))
+    mask = inner
+    layer = Image.new("RGBA", img.size, PEAKING_COLOURS.get(colour, PEAKING_COLOURS["red"]) + (255,))
+    layer.putalpha(mask)
+    return layer
+
+
+def zebras(img: Image.Image, phase: int = 0, level: int = 250) -> Image.Image:
+    """RGBA overlay of diagonal stripes over blown-out (clipped) areas."""
+    a = np.asarray(img.convert("RGB"))
+    clipped = a.max(axis=2) >= level
+    h, w = clipped.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    stripe = ((xx + yy + phase) // 4) % 2 == 0
+    out = np.zeros((h, w, 4), dtype=np.uint8)
+    out[clipped & stripe] = (0, 0, 0, 200)
+    out[clipped & ~stripe] = (255, 255, 255, 120)
+    return Image.fromarray(out, "RGBA")
+
+
+def place(overlay: Image.Image) -> Image.Image:
+    """Scale an RGBA overlay made at preview size onto the screen the way fit() places the image."""
+    x0, y0, x1, y1 = image_rect(overlay.size)
+    screen = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    screen.paste(overlay.resize((x1 - x0, y1 - y0), Image.NEAREST), (x0, y0))
+    return screen
+
+
+def image_rect(img_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Where fit() places an image of this size on the screen: (x0, y0, x1, y1)."""
+    iw, ih = img_size
+    scale = min(W / iw, H / ih)
+    w, h = int(iw * scale), int(ih * scale)
+    x0, y0 = (W - w) // 2, (H - h) // 2
+    return x0, y0, x0 + w, y0 + h
+
+
+def aspect_crop(size: tuple[int, int], aspect: str) -> tuple[int, int, int, int]:
+    """Centre crop box (x0, y0, x1, y1) of `size` for an aspect like '3:2'."""
+    w, h = size
+    try:
+        aw, ah = (int(v) for v in aspect.split(":"))
+    except ValueError:  # "native": the sensor's own shape
+        return 0, 0, w, h
+    if abs((w / h) / (aw / ah) - 1) < 0.01:  # already that shape (e.g. 2028x1520 ≈ 4:3)
+        return 0, 0, w, h
+    if w / h > aw / ah:  # too wide: trim the sides
+        cw = int(h * aw / ah)
+        return (w - cw) // 2, 0, (w + cw) // 2, h
+    ch = int(w * ah / aw)
+    return 0, (h - ch) // 2, w, (h + ch) // 2
+
+
+def aspect_guides(d: ImageDraw.ImageDraw, img_size: tuple[int, int], aspect: str) -> None:
+    """Darken the parts of the preview that a non-native aspect ratio crops away."""
+    x0, y0, x1, y1 = image_rect(img_size)
+    cx0, cy0, cx1, cy1 = aspect_crop((x1 - x0, y1 - y0), aspect)
+    shade = (0, 0, 0, 150)
+    if cx0 > 0:
+        d.rectangle([x0, y0, x0 + cx0 - 1, y1], fill=shade)
+        d.rectangle([x0 + cx1, y0, x1, y1], fill=shade)
+    if cy0 > 0:
+        d.rectangle([x0, y0, x1, y0 + cy0 - 1], fill=shade)
+        d.rectangle([x0, y0 + cy1, x1, y1], fill=shade)
+
+
+def _bolt(d: ImageDraw.ImageDraw, x: int, y: int, colour) -> None:
+    """Small lightning bolt, 7x12 px, top-left at (x, y)."""
+    d.polygon([(x + 4, y), (x, y + 7), (x + 3, y + 7), (x + 2, y + 12), (x + 7, y + 4),
+               (x + 4, y + 4), (x + 5, y)], fill=colour)
+
+
+def battery_icon(d: ImageDraw.ImageDraw, right: int, y: int, percent, charging) -> int:
+    """Battery icon ending at x=right; returns the left edge used.
+
+    percent None means no battery gauge: the camera is on external (USB) power,
+    shown as a full battery with a charge bolt.
+    """
+    f = font(13, "bold")
+    external = percent is None
+    low = not external and percent <= 15
+    col = RED if low else WHITE
+    bw, bh = 22, 11
+    bx1 = right - 3
+    bx0 = bx1 - bw
+    d.rectangle([bx0, y + 2, bx1, y + 2 + bh], outline=col, width=1)
+    d.rectangle([bx1 + 1, y + 5, bx1 + 2, y + bh - 1], fill=col)
+    level = 100 if external else percent
+    fill_w = max(1, int((bw - 3) * level / 100))
+    d.rectangle([bx0 + 2, y + 4, bx0 + 2 + fill_w, y + bh], fill=GREEN if external else col)
+    left = bx0
+    if external or charging:
+        left -= 10
+        _bolt(d, left, y + 2, ACCENT)
+    if not external:
+        text = f"{percent}%"
+        left -= 4 + text_w(d, text, f)
+        d.text((left, y), text, font=f, fill=col)
+    return left
 
 
 def bar(d: ImageDraw.ImageDraw, y0: int, y1: int) -> None:

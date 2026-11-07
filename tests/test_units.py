@@ -121,6 +121,10 @@ def test_settings_roundtrip_and_bad_file(tmp_path):
     p.write_text(json.dumps({"shutter": None, "iso": None, "mode": "bogus"}))
     s = Settings.load(p)
     assert s.shutter and s.iso and s.mode == "P"
+    p.write_text(json.dumps({"grid": True}))      # pre-0.4 on/off grid
+    assert Settings.load(p).grid == "thirds"
+    p.write_text(json.dumps({"grid": False}))
+    assert Settings.load(p).grid == "off"
     p.write_text(json.dumps({"mode": "Tv"}))      # pre-0.3 mode names
     assert Settings.load(p).mode == "S"
     p.write_text(json.dumps({"mode": "Sv"}))
@@ -187,3 +191,73 @@ def test_sysinfo_reads_pi_files(monkeypatch):
     assert sysinfo.board_model() == "Raspberry Pi Zero 2 W Rev 1.0"
     assert sysinfo.processor() == "BCM2837, 4× Cortex-A53 @ 1.0 GHz"
     assert sysinfo.ram() == "512 MB (415 MB usable)"
+
+
+def test_bracket_exposure_moves_shutter_then_gain():
+    from omnicam.exposure import bracket_exposure
+    assert bracket_exposure(1 / 100, 2.0, 1.0, 1.0, 16) == (1 / 50, 2.0)
+    s, g = bracket_exposure(0.5, 2.0, 2.0, 1.0, 16)        # wants 2 s, capped at 1 s
+    assert s == 1.0 and abs(g - 4.0) < 1e-9
+    s, g = bracket_exposure(1 / 100, 1.0, -2.0, 1.0, 16)
+    assert abs(s - 1 / 400) < 1e-12 and g == 1.0
+
+
+def test_zebras_mark_only_clipped_pixels():
+    from omnicam import ui
+    img = Image.new("RGB", (40, 20), (100, 100, 100))
+    img.paste((255, 255, 255), (0, 0, 20, 20))
+    alpha = ui.zebras(img).getchannel("A")
+    assert alpha.crop((0, 0, 20, 20)).getbbox() is not None
+    assert alpha.crop((20, 0, 40, 20)).getbbox() is None
+
+
+def test_peaking_finds_edges():
+    from omnicam import ui
+    img = Image.new("RGB", (40, 20), (0, 0, 0))
+    img.paste((255, 255, 255), (20, 0, 40, 20))
+    assert ui.peaking(img, "red").getchannel("A").getbbox() is not None
+    flat = Image.new("RGB", (40, 20), (90, 90, 90))
+    assert ui.peaking(flat, "red").getchannel("A").getbbox() is None
+
+
+def test_metering_modes_differ_on_bright_centre():
+    from omnicam import ui
+    img = Image.new("RGB", (64, 48), (20, 20, 20))
+    img.paste((240, 240, 240), (28, 20, 36, 28))
+    assert ui.mean_ev(img, "spot") > ui.mean_ev(img, "centre") > ui.mean_ev(img, "matrix")
+
+
+def test_aspect_crop():
+    from omnicam import ui
+    assert ui.aspect_crop((2028, 1520), "4:3") == (0, 0, 2028, 1520)   # within 1 %
+    assert ui.aspect_crop((2028, 1520), "native") == (0, 0, 2028, 1520)
+    x0, y0, x1, y1 = ui.aspect_crop((3000, 2000), "1:1")
+    assert (x1 - x0, y1 - y0) == (2000, 2000)
+    x0, y0, x1, y1 = ui.aspect_crop((4000, 3000), "16:9")
+    assert x1 - x0 == 4000 and y1 - y0 == 2250
+
+
+def test_battery_sources_and_lipo_curve(monkeypatch):
+    from omnicam import battery
+    assert battery.lipo_percent(4.2) == 100 and battery.lipo_percent(3.2) == 0
+    calls = []
+    fake = (("none", lambda: calls.append(1)), ("ok", lambda: battery.BatteryState(80, False)))
+    monkeypatch.setattr(battery.Battery, "SOURCES", fake)
+    b = battery.Battery()
+    assert b.read().percent == 80 and b.name == "ok"
+    assert b.read().percent == 80 and len(calls) == 1   # source remembered
+    monkeypatch.setattr(battery.Battery, "SOURCES", (("none", lambda: None),))
+    b = battery.Battery()
+    assert b.read() is None and b.read() is None
+
+
+def test_picamera_zoom_crop_is_centred_on_measured_full_view():
+    from omnicam.camera import PiCamera
+    cam = PiCamera.__new__(PiCamera)        # no hardware: test the crop maths only
+    cam._crop_max = (0, 0, 3280, 2464)
+    cam._zoom = 1
+    assert cam._crop() == (0, 0, 3280, 2464)
+    cam._zoom = 2
+    assert cam._crop() == (820, 616, 1640, 1232)
+    cam._zoom = 4
+    assert cam._crop() == (1230, 924, 820, 616)

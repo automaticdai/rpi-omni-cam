@@ -9,8 +9,8 @@ from PIL import Image, ImageDraw
 
 from . import exif, filters, ui
 from .buttons import LONG, PRESS, REPEAT, ButtonEvent
-from .exposure import MODE_PARAMS, format_ev, format_iso, format_shutter
-from .menu import MENU, Action, Choice, Section
+from .exposure import BRACKETS, BURSTS, MODE_PARAMS, format_ev, format_focus, format_iso, format_shutter
+from .menu import QUICK, TABS, Action, Choice, Section
 from .storage import Entry
 
 if TYPE_CHECKING:
@@ -44,23 +44,40 @@ def _moves(ev: ButtonEvent) -> int:
 
 # ---------------------------------------------------------------------------
 class LiveView(Screen):
+    """Live view.
+
+    Normally A opens the quick menu (hold A: full menu) and B runs the function button. Pressing Y starts
+    adjusting: the mode's values are highlighted one at a time (Y moves on, past
+    the last one adjusting ends) and A/B step the highlighted value up/down.
+    Adjusting also ends after ADJUST_TIMEOUT_S without a press, or with X.
+    """
+
     wants_preview = True
+    ADJUST_TIMEOUT_S = 5.0
 
     def __init__(self, app: "App"):
         super().__init__(app)
         self._param: Optional[str] = None
+        self.adjusting = False
+        self._adjust_until = 0.0
         self.countdown_until: Optional[float] = None
         self._last_beep = 0
 
     @property
     def params(self) -> tuple[str, ...]:
-        """Values A/B can adjust in the current mode."""
-        return MODE_PARAMS.get(self.app.s.mode, ("ev",))
+        """Values A/B can adjust: the mode's, plus focus in manual-focus mode."""
+        ps = MODE_PARAMS.get(self.app.s.mode, ("ev",))
+        if self.app.camera.info.has_af and self.app.s.af_mode == "manual":
+            ps = ps + ("focus",)
+        return ps
 
     @property
     def selected(self) -> str:
         """Highlighted value; falls back to the mode's first one after a mode change."""
         return self._param if self._param in self.params else self.params[0]
+
+    def _touch(self) -> None:
+        self._adjust_until = self.app.now() + self.ADJUST_TIMEOUT_S
 
     def on_button(self, ev: ButtonEvent) -> None:
         app = self.app
@@ -71,6 +88,7 @@ class LiveView(Screen):
                 app.toast("Self-timer cancelled")
             return
         if b == "X":
+            self.adjusting = False
             if kind == PRESS:
                 if app.timelapse:
                     app.toast("Hold X to stop timelapse")
@@ -86,18 +104,30 @@ class LiveView(Screen):
                     app.start_timelapse()
         elif b == "Y" and kind == PRESS:
             ps = self.params
-            self._param = ps[(ps.index(self.selected) + 1) % len(ps)]
-        elif b in "AB" and kind == PRESS:
-            app.step_exposure(self.selected, 1 if b == "A" else -1)
-        elif b in "AB" and kind == LONG:
+            if not self.adjusting:
+                self.adjusting, self._param = True, ps[0]
+            else:
+                i = ps.index(self.selected) + 1
+                if i >= len(ps):
+                    self.adjusting = False
+                else:
+                    self._param = ps[i]
+            self._touch()
+        elif b in "AB" and self.adjusting:
+            if kind in (PRESS, LONG, REPEAT):  # hold to keep stepping
+                app.step_exposure(self.selected, 1 if b == "A" else -1)
+                self._touch()
+        elif b in "AB" and kind in (PRESS, LONG):
             if app.timelapse:
                 app.toast("Timelapse running")
             elif b == "A":
-                app.open(MenuView(app))
+                app.open(MenuView(app) if kind == LONG else QuickMenuView(app))
             else:
-                app.open(PlaybackView(app))
+                app.run_function(long=kind == LONG)
 
     def tick(self, now: float) -> None:
+        if self.adjusting and now >= self._adjust_until:
+            self.adjusting = False
         if self.countdown_until is None:
             return
         remaining = self.countdown_until - now
@@ -112,11 +142,20 @@ class LiveView(Screen):
         app = self.app
         s = app.s
         frame = ui.fit(app.preview_filtered) if app.preview_filtered else Image.new("RGB", (ui.W, ui.H))
+        if app.preview_raw is not None and not app.busy:
+            # computed on the un-letterboxed preview, then placed like the image
+            raw = app.preview_raw
+            if s.zebras:
+                frame = ui.flatten(frame, ui.place(ui.zebras(raw, int(time.monotonic() * 8) % 8)))
+            if s.peaking != "off":
+                frame = ui.flatten(frame, ui.place(ui.peaking(raw, s.peaking)))
         if app.busy:
             frame = frame.point(lambda v: v // 3)
         layer, d = ui.overlay(frame)
-        if s.grid:
-            ui.grid(d)
+        if s.aspect != "native" and app.preview_raw is not None:
+            ui.aspect_guides(d, app.preview_raw.size, s.aspect)
+        if s.grid != "off":
+            ui.grid(d, diagonal=s.grid == "diagonal")
         if s.histogram and app.preview_raw:
             ui.histogram(d, app.preview_raw)
 
@@ -133,17 +172,26 @@ class LiveView(Screen):
             left = app.shots_left()
             top.append((f"● {left if left < 10000 else '9999+'}", False,
                         ui.RED if left < 10 else ui.WHITE))
+        if s.drive in BURSTS:
+            top.append((f"BURST{BURSTS[s.drive]}", False, ui.WHITE))
+        elif s.drive in BRACKETS:
+            top.append((f"BKT{len(BRACKETS[s.drive])}", False, ui.WHITE))
         if s.self_timer:
-            top.append((f"TIMER {s.self_timer}s", False, ui.WHITE))
+            top.append((f"T{s.self_timer}s", False, ui.WHITE))
         if s.save_raw:
             top.append(("RAW", False, ui.WHITE))
+        if app.camera.info.has_af and s.af_mode != "manual":
+            top.append(({"continuous": "AF-C", "single": "AF-S"}.get(s.af_mode, "AF"), False, ui.GREY))
+        if app.magnify > 1:
+            top.append((f"{app.magnify}×", False, ui.ACCENT))
         if app.storage.in_ram:
             top.append(("RAM", False, ui.RED))
         ui.items_row(d, 4, top, f)
-        if app.temperature:
-            t = f"{app.temperature:.0f}°C"
-            d.text((ui.W - 6 - ui.text_w(d, t, f), 4), t, font=f,
-                   fill=ui.RED if app.temperature >= 75 else ui.GREY)
+        bat = app.battery_state
+        left_edge = ui.battery_icon(d, ui.W - 4, 4, bat.percent if bat else None,
+                                    bat.charging if bat else None)
+        if app.temperature and app.temperature >= 80:
+            d.text((left_edge - 6 - ui.text_w(d, "HOT", f), 4), "HOT", font=f, fill=ui.RED)
 
         # meter + bottom strip
         if app.meter_ev is not None:
@@ -164,12 +212,15 @@ class LiveView(Screen):
             iso = format_iso(meta.gain * 100) if meta else "ISO --"
             iso_col = ui.GREY
         fb = ui.font(14, "bold")
+        adj = self.adjusting
         bottom = [
-            (sh, sel == "shutter", sh_col),
-            (iso, sel == "iso", iso_col),
+            (sh, adj and sel == "shutter", sh_col),
+            (iso, adj and sel == "iso", iso_col),
         ]
         if "ev" in params or s.ev:
-            bottom.append(("EV " + format_ev(s.ev), sel == "ev", ui.WHITE))
+            bottom.append(("EV " + format_ev(s.ev), adj and sel == "ev", ui.WHITE))
+        if "focus" in params:
+            bottom.append((format_focus(s.lens_position), adj and sel == "focus", ui.WHITE))
         bottom.append((s.wb.upper()[:4] if s.wb != "auto" else "AWB", False, ui.GREY))
         if s.filter != "none":
             bottom.append((filters.label(s.filter), False, ui.ACCENT))
@@ -214,62 +265,283 @@ class ReviewView(Screen):
 
 
 # ---------------------------------------------------------------------------
+def _step_option(choice: Choice, value, direction: int):
+    """Next/previous option value, stopping at the ends."""
+    values = [v for v, _ in choice.options]
+    i = values.index(value) if value in values else 0
+    return values[max(0, min(len(values) - 1, i + direction))]
+
+
 class MenuView(Screen):
+    """Tabbed main menu.
+
+    A/B move through the items; moving past the end of a tab continues into the
+    next one, holding A/B jumps a whole tab. Y on a setting changes it in place
+    (◀ value ▶, A/B step, Y keeps, X cancels); On/Off settings toggle; long lists
+    open a picker. Y on an action runs it, on a section opens its page.
+    X goes back (page → tab → live view). The position is remembered.
+    """
+
     def __init__(self, app: "App"):
         super().__init__(app)
-        # stack of (title, node, selected index); node is the list being shown
-        self.stack: list[list] = [["Menu", MENU, 0]]
+        self.tab, self.row = app.menu_pos
+        self.page: Optional[Section] = None
+        self.page_row = 0
+        self.editing: Optional[Choice] = None
+        self._orig = None
+        self.picker: Optional[Choice] = None
+        self.picker_row = 0
 
-    def _rows(self, title: str, node) -> list[tuple[str, str]]:
-        if isinstance(node, Choice):
-            cur = getattr(self.app.s, node.key)
-            return [(lbl, "●" if v == cur else "") for v, lbl in node.options]
-        rows = []
-        for item in node:
-            if isinstance(item, Choice):
-                rows.append((item.label, item.value_label(getattr(self.app.s, item.key))))
-            elif isinstance(item, Section):
-                rows.append((item.label, "›"))
-            else:
-                rows.append((item.label, ""))
-        return rows
+    # ---- state helpers ----
+    @property
+    def items(self) -> list:
+        return self.page.items if self.page else TABS[self.tab].items
 
+    @property
+    def index(self) -> int:
+        return self.page_row if self.page else self.row
+
+    @property
+    def current(self):
+        return self.items[self.index]
+
+    def _remember(self) -> None:
+        self.app.menu_pos = (self.tab, self.row)
+
+    def _move(self, d: int) -> None:
+        if self.page:
+            self.page_row = (self.page_row + d) % len(self.page.items)
+            return
+        self.row += d
+        if self.row < 0:
+            self.tab = (self.tab - 1) % len(TABS)
+            self.row = len(TABS[self.tab].items) - 1
+        elif self.row >= len(TABS[self.tab].items):
+            self.tab = (self.tab + 1) % len(TABS)
+            self.row = 0
+        self._remember()
+
+    def _jump_tab(self, d: int) -> None:
+        if self.page:
+            return
+        self.tab, self.row = (self.tab + d) % len(TABS), 0
+        self._remember()
+
+    # ---- buttons ----
     def on_button(self, ev: ButtonEvent) -> None:
-        frame = self.stack[-1]
-        title, node, sel = frame
-        n = len(node.options) if isinstance(node, Choice) else len(node)
-        if ev.button in "AB":
-            frame[2] = (sel + _moves(ev)) % n
+        app, b, kind = self.app, ev.button, ev.kind
+        if self.picker is not None:
+            if b in "AB":
+                self.picker_row = (self.picker_row + _moves(ev)) % len(self.picker.options)
+            elif kind == PRESS and b == "Y":
+                app.set_setting(self.picker.key, self.picker.options[self.picker_row][0])
+                self.picker = None
+            elif kind == PRESS and b == "X":
+                self.picker = None
             return
-        if ev.kind != PRESS:
+        if self.editing is not None:
+            c = self.editing
+            if b in "AB":
+                app.set_setting(c.key, _step_option(c, getattr(app.s, c.key), -1 if b == "A" else 1))
+            elif kind == PRESS and b == "Y":
+                self.editing = None
+            elif kind == PRESS and b == "X":  # cancel: back to the value before editing
+                app.set_setting(c.key, self._orig)
+                self.editing = None
             return
-        if ev.button == "X":  # back
-            self.stack.pop()
-            if not self.stack:
-                self.app.back_to_live()
+        if b in "AB":
+            if kind == LONG:
+                self._jump_tab(-1 if b == "A" else 1)
+            elif kind == PRESS:
+                self._move(-1 if b == "A" else 1)
             return
-        # Y: select
-        if isinstance(node, Choice):
-            self.app.set_setting(node.key, node.options[sel][0])
-            self.stack.pop()
+        if kind != PRESS:
             return
-        item = node[sel]
+        if b == "X":
+            if self.page:
+                self.page = None
+            else:
+                app.back_to_live()
+            return
+        # Y
+        item = self.current
         if isinstance(item, Section):
-            self.stack.append([item.label, item.items, 0])
-        elif isinstance(item, Choice):
-            cur = getattr(self.app.s, item.key)
-            idx = next((i for i, (v, _) in enumerate(item.options) if v == cur), 0)
-            self.stack.append([item.label, item, idx])
+            self.page, self.page_row = item, 0
         elif isinstance(item, Action):
-            self.app.run_action(item.action)
+            app.run_action(item.action)
+        elif isinstance(item, Choice):
+            value = getattr(app.s, item.key)
+            if item.is_toggle:
+                app.set_setting(item.key, not value)
+            elif item.uses_picker:
+                self.picker = item
+                values = [v for v, _ in item.options]
+                self.picker_row = values.index(value) if value in values else 0
+            else:
+                self.editing, self._orig = item, value
+
+    # ---- drawing ----
+    def _tab_bar(self, d: ImageDraw.ImageDraw) -> None:
+        d.rectangle([0, 0, ui.W, 24], fill=(40, 40, 46))
+        if self.page:
+            d.text((10, 4), f"{TABS[self.tab].name} › {self.page.label}", font=ui.font(14, "bold"),
+                   fill=ui.WHITE)
+            return
+        f = ui.font(11, "bold")
+        slot = ui.W / len(TABS)
+        for i, tab in enumerate(TABS):
+            x0 = int(i * slot)
+            if i == self.tab:
+                d.rectangle([x0 + 1, 2, int(x0 + slot) - 2, 22], fill=ui.ACCENT)
+            tw = ui.text_w(d, tab.name, f)
+            d.text((x0 + (slot - tw) / 2, 6), tab.name, font=f,
+                   fill=(0, 0, 0) if i == self.tab else ui.GREY)
+
+    def _help(self, d: ImageDraw.ImageDraw, text: str) -> None:
+        f = ui.font(11)
+        lines = ui.wrap(d, text, f, ui.W - 16)[:2]
+        y = ui.H - 18 - 4 - 15 * len(lines)
+        d.line([(8, y - 4), (ui.W - 8, y - 4)], fill=(60, 60, 66))
+        for i, line in enumerate(lines):
+            d.text((8, y + i * 15), line, font=f, fill=ui.GREY)
 
     def render(self) -> Image.Image:
-        title, node, sel = self.stack[-1]
-        crumbs = " › ".join(f[0] for f in self.stack[1:]) or "Menu"
-        img, d = ui.panel_screen(crumbs)
-        ui.menu_list(d, self._rows(title, node), sel)
-        ui.hints(d, "A/B move", "Y select · X back")
+        if self.picker is not None:
+            return self._render_picker()
+        img = Image.new("RGB", (ui.W, ui.H), ui.BG)
+        d = ImageDraw.Draw(img)
+        self._tab_bar(d)
+        f, fv = ui.font(15), ui.font(14)
+        top, row_h = 28, 25
+        for i, item in enumerate(self.items):
+            y = top + i * row_h
+            sel = i == self.index
+            label = item.label
+            if isinstance(item, Choice):
+                value = item.value_label(getattr(self.app.s, item.key))
+            elif isinstance(item, Section):
+                value = "›"
+            else:
+                value = ""
+            if sel and self.editing is item:
+                d.rounded_rectangle([4, y, ui.W - 4, y + row_h - 3], 4, outline=ui.ACCENT, width=2)
+                d.text((12, y + 3), label, font=f, fill=ui.WHITE)
+                text = f"◀ {value} ▶"
+                d.text((ui.W - 14 - ui.text_w(d, text, fv), y + 4), text, font=fv, fill=ui.ACCENT)
+                continue
+            if sel:
+                d.rounded_rectangle([4, y, ui.W - 4, y + row_h - 3], 4, fill=ui.ACCENT)
+            d.text((12, y + 3), label, font=f, fill=(0, 0, 0) if sel else ui.WHITE)
+            if value:
+                d.text((ui.W - 14 - ui.text_w(d, value, fv), y + 4), value, font=fv,
+                       fill=(40, 40, 40) if sel else ui.GREY)
+        item = self.current
+        if isinstance(item, Choice):
+            self._help(d, item.help_for(getattr(self.app.s, item.key)))
+        else:
+            self._help(d, item.help)
+        if self.editing is not None:
+            ui.hints(d, "A ◀  B ▶", "Y keep · X cancel")
+        elif self.page:
+            ui.hints(d, "A/B move", "Y select · X back")
+        else:
+            ui.hints(d, "A/B move · hold: tab", "Y select · X back")
         return img
+
+    def _render_picker(self) -> Image.Image:
+        c = self.picker
+        img, d = ui.panel_screen(c.label)
+        cur = getattr(self.app.s, c.key)
+        rows = [(lbl, "●" if v == cur else "") for v, lbl in c.options]
+        ui.menu_list(d, rows, self.picker_row, top=30, row_h=24, visible=6)
+        self._help(d, c.help_for(c.options[self.picker_row][0]))
+        ui.hints(d, "A/B move", "Y choose · X back")
+        return img
+
+
+class QuickMenuView(Screen):
+    """Eight tiles over the live view; Y changes the highlighted one in place."""
+
+    wants_preview = True
+    COLS, TILE_W, TILE_H, TOP = 4, 80, 50, 120
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.index = app.quick_pos
+        self.editing = False
+        self._orig = None
+
+    @property
+    def choice(self) -> Choice:
+        return QUICK[self.index]
+
+    def on_button(self, ev: ButtonEvent) -> None:
+        app, b, kind = self.app, ev.button, ev.kind
+        if self.editing:
+            c = self.choice
+            if b in "AB":
+                app.set_setting(c.key, _step_option(c, getattr(app.s, c.key), -1 if b == "A" else 1))
+            elif kind == PRESS and b == "Y":
+                self.editing = False
+            elif kind == PRESS and b == "X":
+                app.set_setting(c.key, self._orig)
+                self.editing = False
+            return
+        if b == "A" and kind == LONG:
+            app.open(MenuView(app))
+        elif b in "AB" and kind in (PRESS, REPEAT):
+            self.index = (self.index + (-1 if b == "A" else 1)) % len(QUICK)
+            app.quick_pos = self.index
+        elif kind == PRESS and b == "Y":
+            self.editing, self._orig = True, getattr(app.s, self.choice.key)
+        elif kind == PRESS and b == "X":
+            app.back_to_live()
+
+    @staticmethod
+    def _fit(d: ImageDraw.ImageDraw, text: str, width: int):
+        for size in (14, 13, 12, 11, 10):
+            f = ui.font(size, "bold")
+            if ui.text_w(d, text, f) <= width:
+                return f, text
+        f = ui.font(10, "bold")
+        while text and ui.text_w(d, text + "…", f) > width:
+            text = text[:-1]
+        return f, text + "…"
+
+    def render(self) -> Image.Image:
+        base = self.app._live.render()
+        layer, d = ui.overlay(base)
+        d.rectangle([0, self.TOP - 6, ui.W, ui.H], fill=(12, 12, 14, 255))
+        for i, c in enumerate(QUICK):
+            col, row = i % self.COLS, i // self.COLS
+            x0 = col * self.TILE_W + 2
+            y0 = self.TOP + row * (self.TILE_H + 2)
+            x1, y1 = x0 + self.TILE_W - 4, y0 + self.TILE_H
+            sel = i == self.index
+            if sel and self.editing:
+                d.rounded_rectangle([x0, y0, x1, y1], 5, outline=ui.ACCENT, width=2, fill=(30, 30, 34, 255))
+            elif sel:
+                d.rounded_rectangle([x0, y0, x1, y1], 5, fill=ui.ACCENT + (255,))
+            else:
+                d.rounded_rectangle([x0, y0, x1, y1], 5, fill=(36, 36, 42, 255))
+            name = c.label.upper().replace("EXPOSURE COMP.", "EV").replace("WHITE BALANCE", "WB") \
+                .replace("FOCUS MODE", "FOCUS").replace("ASPECT RATIO", "ASPECT")
+            fl = ui.font(9, "bold")
+            tc = (0, 0, 0) if sel and not self.editing else ui.GREY
+            d.text((x0 + (x1 - x0 - ui.text_w(d, name, fl)) / 2, y0 + 5), name, font=fl, fill=tc)
+            value = c.short_label(getattr(self.app.s, c.key))
+            inner = (x1 - x0) - (20 if sel and self.editing else 8)
+            fv, value = self._fit(d, value, inner)
+            vc = (0, 0, 0) if sel and not self.editing else (ui.ACCENT if sel else ui.WHITE)
+            d.text((x0 + (x1 - x0 - ui.text_w(d, value, fv)) / 2, y0 + 23), value, font=fv, fill=vc)
+            if sel and self.editing:
+                fa = ui.font(9, "bold")
+                d.text((x0 + 3, y0 + 26), "◀", font=fa, fill=ui.ACCENT)
+                d.text((x1 - 3 - ui.text_w(d, "▶", fa), y0 + 26), "▶", font=fa, fill=ui.ACCENT)
+        hint = ("A ◀  B ▶   Y keep   X cancel" if self.editing
+                else "A/B move   Y change   X close   hold A: menu")
+        ui.centered(d, ui.H - 15, hint, ui.font(10, "bold"), ui.GREY)
+        return ui.flatten(base, layer)
 
 
 # ---------------------------------------------------------------------------
@@ -307,12 +579,12 @@ class PlaybackView(Screen):
         if ev.button in "AB" and self.entries:
             self.index = (self.index + _moves(ev)) % len(self.entries)
             self.zoom = False
-        elif ev.button == "Y" and ev.kind == PRESS:
+        elif ev.button == "X" and ev.kind == PRESS:  # back: leave zoom, then playback
             if self.zoom:
                 self.zoom = False
             else:
                 self.app.back_to_live()
-        elif ev.button == "X" and self.entries:
+        elif ev.button == "Y" and self.entries:
             if ev.kind == PRESS:
                 self.zoom = not self.zoom
             elif ev.kind == LONG:
@@ -338,6 +610,8 @@ class PlaybackView(Screen):
             ui.centered(d, 105, msg, ui.font(16), ui.GREY)
             ui.hints(d, "", "Y back")
             return canvas
+        if self.app.s.zebras:
+            img = ui.flatten(img, ui.zebras(img, int(time.monotonic() * 8) % 8))
         layer, d = ui.overlay(img)
         entry = self.entries[self.index]
         f, fs = ui.font(13, "bold"), ui.font(12)

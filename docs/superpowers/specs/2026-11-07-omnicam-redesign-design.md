@@ -34,7 +34,15 @@ when the Pi boots (backlight and LED off, camera stopped). Holding **Y** for
 button skips) or off (refused during USB export or while saving; a running
 timelapse is stopped). Menu › Shut down still powers off the Pi.
 
-Live view:
+Live view (revised after hardware testing, decided): A short = menu; B short =
+function button, user-assignable in Menu › System › B button (default
+Playback; also Filter/WB/Mode/Self-timer cycle, Grid/Histogram toggle,
+Timelapse start/stop, USB export); Playback also in the top-level menu.
+Exposure stepping only while adjusting: Y starts adjusting (first value of the
+mode highlighted), A/B step up/down (hold repeats), Y moves to the next value
+and ends after the last; adjusting also ends after 5 s idle or on X.
+
+Original live view (superseded):
 - **X** short: take photo (honours self-timer). **X** hold: start/stop timelapse.
 - **Y** short: move highlight between the values the current mode lets you set.
 - **A** short: highlighted value +1 step. **A** hold: open menu.
@@ -62,8 +70,9 @@ gain. A 1 s exposure shows a countdown.
   quality, save RAW, self-timer), Timelapse (interval, shots, exposure lock),
   Display (grid, histogram, brightness, screen-off timer), System (storage
   info, erase all photos, camera info, shut down), USB export.
-- **Playback:** newest first; filename, date, exposure info from EXIF. X
-  toggles 100 % centre crop, hold X deletes (with confirmation). A timelapse
+- **Playback:** newest first; filename, date, exposure info from EXIF. Y
+  toggles 100 % centre crop, hold Y deletes (with confirmation; the 3 s power
+  hold is ignored while a confirmation is open), X goes back (revised). A timelapse
   sequence appears as one entry; deleting it deletes the whole sequence.
 
 ## Storage (decided, revised after hardware testing)
@@ -97,6 +106,39 @@ Settings persist in a JSON file between power cycles.
 ## Non-goals for v1
 
 Video recording, Wi-Fi transfer, focus peaking, battery gauge.
+
+## Additions after hardware testing (decided)
+
+- Shooting: drive modes (single, burst ×5/×10 at "S" size via one still-mode
+  switch, bracketing 3/5 frames via exposure lock: shutter first, gain past the
+  1 s cap, WB held), metering (centre/spot/matrix; our meter follows it),
+  picture style (sharpness/contrast/saturation Low/Normal/High, NR
+  Off/Fast/HQ, NR applied to stills only), image size L/M/S, aspect ratio
+  native/4:3/3:2/16:9/1:1 (centre crop after capture, live-view shading),
+  focus magnifier 1/2/4× via ScalerCrop (resets on shot), focus peaking,
+  zebras (live view + playback), AF-C/AF-S/MF on AF cameras (MF distance is
+  a Y-adjustable value). Unsupported controls are dropped per camera.
+- System: Reset settings (keeps photo_dir).
+- Battery level top right (PiSugar TCP, /sys/class/power_supply, INA219 at
+  0x43), `--` if none; temperature moved to Camera info, red HOT ≥ 80 °C.
+
+## Menu redesign (decided)
+
+Two tiers. **Quick menu** (A in live view): 8 tiles over the live view — Mode,
+Drive, EV, WB, Metering, Focus, Filter, Aspect; A/B move, Y edits in place
+(◀ value ▶, applied live; Y keeps, X reverts), X closes, hold A opens the full
+menu; remembers the last tile. **Full menu** (hold A): six tabs SHOOT / IMAGE /
+STYLE / FOCUS / TL / SETUP, ≤ 6 items each (no scrolling); A/B move with
+continuous scroll across tabs, hold A/B jumps a tab; Y on a setting toggles
+(On/Off), edits in place (< 7 options) or opens a picker (≥ 7); Y on an action
+runs it; SETUP has Storage and About sub-pages; X goes back; one-line help for
+each item/value; position remembered. Button rules: Y choose/confirm, X
+back/cancel, A/B move/change, hold to jump, hold Y 3 s power.
+
+Function button (revised): B press and B hold (0.7 s) each run a user-chosen
+function (defaults Playback / Magnify; hold may be None). SETUP: B press,
+B hold, Brightness, Screen off, Storage ›, About › (Camera info, Reset
+settings, Shut down).
 
 ## Builder's calls
 

@@ -21,6 +21,8 @@ apt-get install -y --no-install-recommends \
     python3-picamera2 python3-pil python3-numpy python3-venv python3-pip \
     python3-spidev python3-libgpiod \
     fonts-dejavu-core dosfstools
+# I2C access for INA219-based UPS HATs (battery level); optional.
+apt-get install -y --no-install-recommends python3-smbus2 || true
 # RPi.GPIO API (buttons, LED, backlight): rpi-lgpio on current releases.
 apt-get install -y --no-install-recommends python3-rpi-lgpio \
     || apt-get install -y --no-install-recommends python3-rpi.gpio

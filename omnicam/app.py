@@ -16,11 +16,13 @@ from PIL import Image
 
 from . import __version__, exif, filters, sysinfo, ui
 from .buttons import LONG, POWER, ButtonTracker
-from .camera import FrameMeta
+from .battery import Battery
+from .camera import FrameMeta, scaled_size
 from .config import DEFAULT_CONFIG_PATH, Settings
-from .exposure import EV_STEPS, format_shutter, iso_steps, shutter_steps, step
+from .exposure import (BRACKETS, BURSTS, EV_STEPS, FOCUS_STEPS, MAX_SHUTTER_S,
+                       bracket_exposure, format_shutter, iso_steps, shutter_steps, step)
 from .screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
-                      MenuView, ReviewView, Screen, WelcomeView)
+                      MenuView, PlaybackView, ReviewView, Screen, WelcomeView)
 from .storage import PHOTO_IMAGE, Storage
 
 SAVE_DEBOUNCE_S = 2.0
@@ -162,6 +164,12 @@ class App:
         self.meter_ev: Optional[float] = None
         self.temperature: Optional[float] = read_temperature()
         self._temp_at = 0.0
+        self.battery = Battery()
+        self.battery_state = None
+        self._battery_at = -1e9
+        self.magnify = 1  # focus magnifier: 1, 2 or 4
+        self.menu_pos = (0, 0)  # last (tab, row) in the main menu
+        self.quick_pos = 0  # last quick-menu tile
         self._toast: Optional[tuple[str, tuple, float]] = None
         self._led_until: Optional[float] = None
         self._dirty_at: Optional[float] = None
@@ -274,6 +282,9 @@ class App:
             self.toast("No photo storage: saving to RAM", ui.RED, 4)
 
     def power_off(self) -> None:
+        if isinstance(self.screen, ConfirmView):
+            # e.g. holding Y in playback to delete: don't also power off
+            return
         if isinstance(self.screen, ExportView):
             self.toast("Stop USB export first", ui.RED, 2.5)
             return
@@ -283,6 +294,7 @@ class App:
         log.info("power off")
         if self.timelapse:
             self.stop_timelapse()
+        self.set_magnify(1)
         img, d = ui.panel_screen("omnicam")
         ui.centered(d, 105, "Turning off…", ui.font(18, "bold"))
         self.display.show(img)
@@ -304,7 +316,7 @@ class App:
         img, meta = self.camera.preview()
         self.preview_raw, self.preview_meta = img, meta
         self.preview_filtered = filters.apply(self.s.filter, img)
-        self.meter_ev = ui.mean_ev(img) + meta.ev_bias
+        self.meter_ev = ui.mean_ev(img, self.s.metering) + meta.ev_bias
 
     def _housekeeping(self, now: float) -> None:
         if self._led_until is not None and now >= self._led_until:
@@ -319,6 +331,9 @@ class App:
         if now - self._temp_at > 5:
             self._temp_at = now
             self.temperature = read_temperature()
+        if now - self._battery_at > 30:
+            self._battery_at = now
+            self.battery_state = self.battery.read()
         countdown = isinstance(self.screen, LiveView) and self.screen.countdown_until is not None
         if (self.screen_on and self.s.screen_off and not countdown and not self.busy
                 and now - self._last_activity > self.s.screen_off):
@@ -383,6 +398,8 @@ class App:
             self.s.shutter = step(shutter_steps(info.max_exposure_s), self.s.shutter, direction)
         elif which == "iso":
             self.s.iso = step(iso_steps(info.max_gain), self.s.iso, direction)
+        elif which == "focus":  # A = closer (more dioptres), B = farther
+            self.s.lens_position = step(FOCUS_STEPS, self.s.lens_position, direction, log=False)
         else:
             self.s.ev = step(EV_STEPS, self.s.ev, direction, log=False)
         self.mark_dirty()
@@ -390,10 +407,12 @@ class App:
 
     def shot_bytes(self) -> float:
         """Estimated size of one shot (JPEG, plus DNG if RAW is on)."""
-        w, h = self.camera.info.resolution
-        est = self._avg_jpeg or w * h * {95: 0.55, 90: 0.4}.get(self.s.jpeg_quality, 0.25)
+        rw, rh = self.camera.info.resolution
+        x0, y0, x1, y1 = ui.aspect_crop(scaled_size((rw, rh), self.s.image_size), self.s.aspect)
+        pixels = (x1 - x0) * (y1 - y0)
+        est = self._avg_jpeg or pixels * {95: 0.55, 90: 0.4}.get(self.s.jpeg_quality, 0.25)
         if self.s.save_raw:
-            est += w * h * 2
+            est += rw * rh * 2
         return max(est, 1)
 
     def shots_left(self, fresh: bool = False) -> int:
@@ -415,10 +434,12 @@ class App:
         return False
 
     # ---- capture ------------------------------------------------------
-    def _capture_to(self, path: Path, settings: Settings) -> tuple[Path, Image.Image]:
-        when = datetime.now()
-        raw = path.with_suffix(".dng") if settings.save_raw else None
-        img, meta = self.camera.capture(settings, raw)
+    def _save(self, img: Image.Image, meta: FrameMeta, path: Path, settings: Settings,
+              when: datetime) -> Image.Image:
+        """Crop to the aspect ratio, filter, write with EXIF; returns a screen-size thumbnail."""
+        box = ui.aspect_crop(img.size, settings.aspect)
+        if box != (0, 0, *img.size):
+            img = img.crop(box)
         img = filters.apply(settings.filter, img)
         exif_bytes = exif.build(self.camera.info.model, meta.exposure_s, meta.gain, settings.ev, when)
         self.storage.save_jpeg(img, path, settings.jpeg_quality, exif_bytes)
@@ -426,24 +447,89 @@ class App:
         self._avg_jpeg = size if self._avg_jpeg is None else 0.8 * self._avg_jpeg + 0.2 * size
         self._shots_cache = None
         img.thumbnail((ui.W, ui.H))
-        return path, img
+        return img
+
+    def _capture_to(self, path: Path, settings: Settings) -> tuple[Path, Image.Image, int]:
+        when = datetime.now()
+        raw = path.with_suffix(".dng") if settings.save_raw else None
+        size = scaled_size(self.camera.info.resolution, settings.image_size)
+        img, meta = self.camera.capture(settings, raw, size)
+        return path, self._save(img, meta, path, settings, when), 1
+
+    def _burst(self, settings: Settings, count: int) -> tuple[Path, Image.Image, int]:
+        """Back-to-back frames at reduced size (≈ a quarter of the pixels)."""
+        size = scaled_size(self.camera.info.resolution, "S")
+        frames = self.camera.burst(settings, count, size)
+        when = datetime.now()
+        path = thumb = None
+        for img, meta in frames:
+            path = self.storage.next_photo_path(when)
+            thumb = self._save(img, meta, path, settings, when)
+        return path, thumb, len(frames)
+
+    def _bracket(self, settings: Settings, offsets: tuple[float, ...],
+                 base: FrameMeta) -> tuple[Path, Image.Image, int]:
+        """Same scene at several exposures: shutter changes first, ISO once the
+        shutter reaches its limit. White balance is held for the series."""
+        info = self.camera.info
+        max_shutter = min(MAX_SHUTTER_S, info.max_exposure_s)
+        path = thumb = None
+        try:
+            for ev in offsets:
+                shutter, gain = bracket_exposure(base.exposure_s, base.gain, ev, max_shutter, info.max_gain)
+                self.camera.lock(FrameMeta(shutter, gain, base.colour_gains))
+                path = self.storage.next_photo_path()
+                path, thumb, _ = self._capture_to(path, settings)
+        finally:
+            self.camera.lock(None)
+            self.camera.apply(self.s)
+        return path, thumb, len(offsets)
+
+    def _bracket_base(self, settings: Settings) -> Optional[FrameMeta]:
+        """Exposure the bracket is centred on: what the photo would get now."""
+        meta = self.preview_meta
+        if meta is None or not meta.exposure_s:
+            return None
+        total = meta.exposure_s * meta.gain * 2 ** meta.ev_bias
+        shutter = settings.exp_shutter or meta.exposure_s
+        gain = settings.exp_iso / 100 if settings.exp_iso else total / shutter
+        if settings.exp_iso and not settings.exp_shutter:
+            shutter = total / gain
+        return FrameMeta(shutter, max(1.0, min(gain, self.camera.info.max_gain)), meta.colour_gains)
 
     def _snapshot(self) -> Settings:
         return Settings(**vars(self.s))
 
+    def set_magnify(self, level: int) -> None:
+        self.magnify = level
+        self.camera.set_zoom(level)
+
     def take_photo(self) -> None:
         if self.busy or not self._check_space():
             return
+        if self.magnify != 1:  # the magnifier is for focusing; shoot the full frame
+            self.set_magnify(1)
+        settings = self._snapshot()
+        drive = settings.drive
         try:
-            path = self.storage.next_photo_path()
+            if drive in BURSTS:
+                fn = lambda: self._burst(settings, BURSTS[drive])
+            elif drive in BRACKETS:
+                base = self._bracket_base(settings)
+                if base is None:
+                    self.toast("No exposure reading yet", ui.RED)
+                    return
+                fn = lambda: self._bracket(settings, BRACKETS[drive], base)
+            else:
+                path = self.storage.next_photo_path()
+                fn = lambda: self._capture_to(path, settings)
         except OSError as e:
             self.toast(f"Storage error: {e.strerror}", ui.RED)
             return
-        settings = self._snapshot()
         self.led((1, 0, 0), None)
         expected = settings.exp_shutter if settings.exp_shutter and settings.exp_shutter >= 1 else None
-        log.info("capture -> %s", path)
-        self.job = Job("photo", lambda: self._capture_to(path, settings), self.now(), expected)
+        log.info("capture (%s)", drive)
+        self.job = Job("photo", fn, self.now(), expected)
 
     def _finish_job(self) -> None:
         job = self.job
@@ -463,11 +549,13 @@ class App:
                 self.back_to_live()
             return
         if job.kind == "photo":
-            path, thumb = job.result
-            log.info("saved %s (%d bytes) in %.1fs", path, path.stat().st_size, self.now() - job.started)
+            path, thumb, count = job.result
+            log.info("saved %d photo(s), last %s (%d bytes) in %.1fs", count, path,
+                     path.stat().st_size, self.now() - job.started)
             self.led((0, 1, 0), 0.3)
             if self.screen is self._live:
-                self.open(ReviewView(self, thumb, path.name))
+                name = path.name if count == 1 else f"{count} photos, last {path.name}"
+                self.open(ReviewView(self, thumb, name))
         elif job.kind == "frame":
             tl = self.timelapse
             if tl:
@@ -517,9 +605,59 @@ class App:
         self.job = Job("frame", lambda: self._capture_to(path, settings), now)
 
     # ---- menu actions -------------------------------------------------
+    def run_function(self, long: bool = False) -> None:
+        """B in live view: the user-chosen function for a press or a hold
+        (Menu › SETUP › B press / B hold)."""
+        from . import menu as m
+
+        fn = self.s.fn_button_long if long else self.s.fn_button
+        if fn == "none":
+            return
+
+        def cycle(key: str, options: list) -> None:
+            values = [v for v, _ in options]
+            cur = getattr(self.s, key)
+            i = (values.index(cur) + 1) % len(values) if cur in values else 0
+            self.set_setting(key, values[i])
+            self.toast(dict(options)[values[i]], ui.ACCENT)
+
+        def choice(key: str) -> list:
+            return m.choice_for(key).options
+
+        if fn == "playback":
+            self.open(PlaybackView(self))
+        elif fn == "magnify":
+            level = {1: 2, 2: 4}.get(self.magnify, 1)
+            self.set_magnify(level)
+            self.toast(f"Magnify {level}×", ui.ACCENT)
+        elif fn == "zebras":
+            self.set_setting("zebras", not self.s.zebras)
+            self.toast(f"Highlight warning {'on' if self.s.zebras else 'off'}", ui.ACCENT)
+        elif fn == "usb_export":
+            self.run_action("usb_export")
+        elif fn == "timelapse":
+            if self.timelapse:
+                self.stop_timelapse()
+            elif not self.busy:
+                self.start_timelapse()
+        elif fn == "histogram":
+            self.set_setting(fn, not self.s.histogram)
+            self.toast(f"Histogram {'on' if self.s.histogram else 'off'}", ui.ACCENT)
+        elif fn in ("filter", "wb", "mode", "self_timer", "grid", "drive", "metering",
+                    "peaking", "af_mode"):
+            cycle(fn, choice(fn))
+
     def run_action(self, action: str) -> None:
         menu = self.screen
-        if action == "storage_info":
+        if action == "playback":
+            self.open(PlaybackView(self))
+        elif action == "timelapse_start":
+            self.back_to_live()
+            if self.timelapse:
+                self.toast("Timelapse already running")
+            elif not self.busy:
+                self.start_timelapse()
+        elif action == "storage_info":
             used, total = self.storage.usage()
             gb = 1024 ** 3
             where = (f"Photo storage: {self.photo_image}" if self.storage.mounted
@@ -540,7 +678,10 @@ class App:
                      f"Sensor: {i.model}",
                      f"Resolution: {i.resolution[0]}×{i.resolution[1]} ({mp:.1f} MP)",
                      f"Shutter: {format_shutter(shutters[0])} – {format_shutter(shutters[-1])}",
-                     f"ISO: {iso_steps(i.max_gain)[0]} – {iso_steps(i.max_gain)[-1]}"]
+                     f"ISO: {iso_steps(i.max_gain)[0]} – {iso_steps(i.max_gain)[-1]}",
+                     "Temperature: " + (f"{self.temperature:.0f} °C" if self.temperature else "n/a"),
+                     "Battery: " + (f"{self.battery.name}, {self.battery_state.percent}%"
+                                    if self.battery_state else "external power (no gauge)")]
             self.open(InfoView(self, "Camera", lines, back=menu))
         elif action == "usb_export":
             if self.storage.in_ram:
@@ -549,6 +690,9 @@ class App:
                     "there is nothing to export over USB."], back=menu))
                 return
             self.start_export()
+        elif action == "reset":
+            self.open(ConfirmView(self, "Reset all settings to defaults?", "Reset",
+                                  self._reset_settings, back=menu))
         elif action == "erase":
             self.open(ConfirmView(self, "Erase ALL photos?", "Erase", self._erase, back=menu))
         elif action == "shutdown":
@@ -581,6 +725,18 @@ class App:
 
         self.job = Job("export_stop", lambda: self.system.usb_export_stop(
             self.storage.requested, self.photo_image), self.now(), on_done=done)
+
+    def _reset_settings(self) -> None:
+        keep = {"photo_dir": self.s.photo_dir}
+        for k, v in vars(Settings(**keep)).items():
+            setattr(self.s, k, v)  # in place: screens hold a reference to self.s
+        self.set_magnify(1)
+        self.camera.apply(self.s)
+        self.display.set_backlight(self.s.brightness / 100)
+        self.mark_dirty()
+        log.info("settings reset to defaults")
+        self.toast("Settings reset", ui.GREEN)
+        self.back_to_live()
 
     def _erase(self) -> None:
         import shutil

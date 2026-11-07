@@ -32,6 +32,35 @@ def nearest(values: Sequence[float], target: float) -> float:
     return min(values, key=lambda v: abs(math.log2(v) - math.log2(target)))
 
 
+# Manual focus positions in dioptres (1/distance in m); 0 = infinity.
+FOCUS_STEPS: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0)
+
+# Drive modes: (frames, EV offsets) for bracketing; burst handled separately.
+BRACKETS: dict[str, tuple[float, ...]] = {
+    "bracket3_1": (0.0, -1.0, 1.0),
+    "bracket3_2": (0.0, -2.0, 2.0),
+    "bracket5_1": (0.0, -1.0, 1.0, -2.0, 2.0),
+}
+BURSTS: dict[str, int] = {"burst5": 5, "burst10": 10}
+
+
+def format_focus(dioptres: float) -> str:
+    if dioptres <= 0:
+        return "MF ∞"
+    m = 1 / dioptres
+    return f"MF {m:.1f}m" if m < 10 else f"MF {m:.0f}m"
+
+
+def bracket_exposure(shutter: float, gain: float, ev: float, max_shutter: float,
+                     max_gain: float) -> tuple[float, float]:
+    """Shift an exposure by ev stops: shutter first, then gain once the
+    shutter hits max_shutter (or 1/4000 s at the short end)."""
+    target = shutter * gain * 2 ** ev
+    s = min(max(shutter * 2 ** ev, SHUTTER_STEPS[0]), max_shutter)
+    g = min(max(target / s, 1.0), max_gain)
+    return s, g
+
+
 # Mode -> values the A/B buttons adjust in live view (Y cycles between them).
 MODES = ("P", "A", "S", "M")  # Sony naming and order
 MODE_PARAMS: dict[str, tuple[str, ...]] = {
