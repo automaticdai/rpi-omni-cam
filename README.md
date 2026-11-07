@@ -11,7 +11,8 @@ Zero 2 W, a Raspberry Pi camera and a Pimoroni Display HAT Mini.
 - Filters: B&W, Sepia, High Contrast, Vivid, Cool, Warm, Vintage (baked into the JPEG)
 - Self-timer, timelapse with exposure lock
 - On-camera playback with 100 % zoom and delete
-- Photos stored on a separate FAT32 partition you can read with any card reader
+- Photos saved on the SD card; **USB export** turns the camera into a USB drive
+  on your computer over the micro-USB port
 
 ## Hardware
 
@@ -60,49 +61,47 @@ amber during the self-timer and blue for each timelapse frame.
 ## Setup
 
 1. Flash **Raspberry Pi OS Lite** with Raspberry Pi Imager, setting up
-   Wi-Fi/SSH as you like.
-2. **Before the first boot**, stop the OS from expanding itself over the whole
-   card, so there is room left for the photo partition. Open the card's boot
-   drive on your computer (it shows up as `bootfs` on Windows/macOS/Linux) and
-   edit `cmdline.txt` — it is a single line:
-   - **Trixie** (current release): delete the word `resize`
-   - **Bookworm**: delete `init=/usr/lib/raspberrypi-sys-mods/firstboot`
-
-   Save, eject, and boot the Pi.
-3. Clone this repo on the Pi, install, and create the photo partition:
+   Wi-Fi/SSH as you like, and boot the Pi.
+2. Clone this repo on the Pi and install:
    ```bash
    git clone <this repo> ~/rpi-omni-cam
    cd ~/rpi-omni-cam
-   sudo ./scripts/install.sh            # picamera2, Display HAT Mini, SPI, service
-   sudo ./scripts/partition-on-pi.sh 8  # root grows to 8 GB, the rest becomes PHOTOS
+   sudo ./scripts/install.sh      # or: sudo PHOTOS_SIZE_GB=8 ./scripts/install.sh
    sudo reboot
    ```
-   `partition-on-pi.sh` works on the running system: it grows the root
-   filesystem to the given size and creates a FAT32 `PHOTOS` partition in the
-   rest of the card, mounted at `/media/photos`. It checks the root filesystem
-   first and refuses to do anything if step 2 was missed.
+   This installs `picamera2` and the display driver, configures SPI for the
+   Display HAT Mini, enables USB device mode, creates the photo storage and
+   enables the `omnicam` service.
 
-**If you missed step 2** (root already fills the card), a running Pi can't
-shrink it. Either re-flash and do step 2, or put the card in a reader on a
-Linux machine (on Windows, WSL2 can reach a USB card reader via `usbipd-win`)
-and run:
-```bash
-lsblk                                            # find the card, e.g. /dev/sdb
-sudo ./scripts/partition-from-pc.sh /dev/sdb 8   # 8 GB for the OS, rest for photos
-```
+### Photo storage
 
-Until the photo partition exists the camera still works, but photos are kept
+Photos are saved on the SD card, inside a FAT32 disk-image file
+`/var/lib/omnicam/photos.img` that is mounted at `/media/photos`. By default it
+gets half of the free space (at most 32 GB); set `PHOTOS_SIZE_GB` when running
+`install.sh` to choose. It is an image file rather than a plain folder because
+USB storage mode can only share a whole disk with the computer, not a folder.
+
+If the photo storage isn't mounted, the camera still works, but photos are kept
 **in RAM only** (`/dev/shm/omnicam-photos`) and are **lost at power-off**. The
 status bar shows a red **RAM**, and shutting down warns you if RAM photos would
-be lost. You can still copy them off over the network before shutting down
-(`scp -r pi@<camera>:/dev/shm/omnicam-photos/DCIM .`). RAM storage is capped at
-128 MB and always leaves 192 MB of memory free for capturing; when it is full
-the camera says so instead of taking the shot.
+be lost. RAM storage is capped at 128 MB and always leaves 192 MB of memory free
+for capturing; when it is full the camera says so instead of taking the shot.
 
-### Getting photos off the camera
+### Getting photos off the camera (USB export)
 
-Shut the camera down (Menu › System › Shut down), take the card out and put it in a
-card reader. The `PHOTOS` drive contains:
+1. On the camera: **Menu › USB export**.
+2. Connect the Pi's **USB data port** — the inner micro-USB, marked `USB`, not
+   `PWR IN` — to your computer. A drive named **PHOTOS** appears. The computer
+   can also power the camera through this port.
+3. Copy (or delete) photos on the computer, then **eject** the drive there.
+4. On the camera press **X** to stop the export. The camera checks the drive,
+   takes it back and returns to live view.
+
+No photos can be taken while exporting, because the computer and the camera
+must not write to the same drive at the same time. If the cable is pulled
+without ejecting, the camera repairs the drive when the export stops.
+
+The drive contains:
 
 ```
 DCIM/2026-11-07/IMG_0001.jpg
@@ -148,11 +147,11 @@ omnicam/
   buttons.py    short / long / repeat press detection
   exposure.py   modes, shutter/ISO/EV steps, formatting
   filters.py    image filters
-  storage.py    photo paths, listing, deletion
+  storage.py    photo paths, listing, deletion, RAM fallback
   menu.py       menu tree
   ui.py         drawing helpers
   exif.py       EXIF read/write
-scripts/        install.sh, partition-on-pi.sh, partition-from-pc.sh
+scripts/        install.sh
 systemd/        omnicam.service
 ```
 
@@ -166,3 +165,8 @@ systemd/        omnicam.service
   Mini uses GPIO9 (SPI MISO) as its D/C line, which newer kernels won't release
   while SPI owns it. `/boot/firmware/config.txt` needs `dtparam=spi=on` and
   `dtoverlay=spi0-2cs,no_miso` (install.sh sets this), then reboot.
+- **USB export says "USB device mode not enabled"** — `/boot/firmware/config.txt`
+  needs `dtoverlay=dwc2,dr_mode=peripheral` under `[all]` (install.sh adds it),
+  then reboot.
+- **No PHOTOS drive appears on the computer** — check you used the data port
+  (marked `USB`) and a data cable, not a charge-only one.

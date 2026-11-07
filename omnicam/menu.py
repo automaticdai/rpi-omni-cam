@@ -75,9 +75,10 @@ MENU: list[Item] = [
         Choice("Brightness", "brightness", [(v, f"{v} %") for v in (25, 50, 75, 100)]),
         Choice("Screen off", "screen_off", [(0, "Never"), (30, "30 s"), (60, "1 min"), (300, "5 min")]),
     ]),
+    Action("USB export", "usb_export"),
     Section("System", [
         Action("Storage info", "storage_info"),
-        Action("Format photo partition", "format"),
+        Action("Erase all photos", "erase"),
         Action("Camera info", "camera_info"),
         Action("Shut down", "shutdown"),
     ]),

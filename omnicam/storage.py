@@ -1,4 +1,8 @@
-"""Photo storage on the FAT32 photo partition.
+"""Photo storage.
+
+Photos live in a FAT32 disk-image file on the SD card (PHOTO_IMAGE), loop-mounted
+at the photo directory (/media/photos, see install.sh). Being a disk image, it can
+be handed to a computer as a USB drive over the micro-USB port (USB export).
 
 Layout:  <root>/DCIM/YYYY-MM-DD/IMG_NNNN.jpg
          <root>/DCIM/YYYY-MM-DD/TL_NNNN/FRAME_NNNNN.jpg
@@ -16,10 +20,11 @@ from typing import Optional
 
 from PIL import Image
 
-# Without the photo partition, photos go to RAM (tmpfs) rather than the root
+# Without the mounted photo image, photos go to RAM (tmpfs) rather than the root
 # filesystem. They are lost at power-off. The Zero 2 has only 512 MB and a
 # full-resolution capture needs a lot of it, so RAM storage is capped twice:
 # a fixed budget, and always leaving RAM_RESERVE_BYTES of memory available.
+PHOTO_IMAGE = Path("/var/lib/omnicam/photos.img")
 FALLBACK_DIR = Path("/dev/shm/omnicam-photos")
 RAM_BUDGET_BYTES = 128 * 1024 * 1024
 RAM_RESERVE_BYTES = 192 * 1024 * 1024
@@ -61,9 +66,9 @@ class Entry:
 class Storage:
     def __init__(self, photo_dir: str, require_mount: bool = True):
         self.requested = Path(photo_dir)
-        self.on_partition = (not require_mount) or os.path.ismount(self.requested)
-        self.in_ram = not self.on_partition
-        self.root = self.requested if self.on_partition else FALLBACK_DIR
+        self.mounted = (not require_mount) or os.path.ismount(self.requested)
+        self.in_ram = not self.mounted
+        self.root = self.requested if self.mounted else FALLBACK_DIR
         self.dcim = self.root / "DCIM"
 
     # ---- naming -------------------------------------------------------

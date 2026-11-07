@@ -19,9 +19,9 @@ from .buttons import ButtonTracker
 from .camera import FrameMeta
 from .config import DEFAULT_CONFIG_PATH, Settings
 from .exposure import EV_STEPS, format_shutter, iso_steps, shutter_steps, step
-from .screens import (BusyView, ConfirmView, InfoView, LiveView, MenuView,
-                      ReviewView, Screen)
-from .storage import Storage
+from .screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
+                      MenuView, ReviewView, Screen)
+from .storage import PHOTO_IMAGE, Storage
 
 SAVE_DEBOUNCE_S = 2.0
 log = logging.getLogger("omnicam")
@@ -70,31 +70,63 @@ class Timelapse:
 class System:
     """Things that need root on the real device."""
 
+    GADGET = "g_mass_storage"
+
     def shutdown(self) -> None:
         subprocess.run(["systemctl", "poweroff"], check=False)
 
-    def format_partition(self, storage: Storage) -> None:
-        mount = storage.requested
-        if not os.path.ismount(mount):
-            raise RuntimeError("Photo partition is not mounted")
-        src = subprocess.run(["findmnt", "-n", "-o", "SOURCE", "--target", str(mount)],
-                             check=True, capture_output=True, text=True).stdout.strip()
-        subprocess.run(["umount", str(mount)], check=True)
+    @staticmethod
+    def _run(*cmd: str) -> subprocess.CompletedProcess:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            raise RuntimeError((res.stderr or res.stdout or f"{cmd[0]} failed").strip().splitlines()[-1])
+        return res
+
+    def usb_export_start(self, mount: Path, image: Path) -> None:
+        """Unmount the photo image and offer it to a USB host as a mass-storage drive."""
+        if not image.exists():
+            raise RuntimeError("No photo image - run install.sh")
+        os.sync()
+        if os.path.ismount(mount):
+            self._run("umount", str(mount))
+        subprocess.run(["modprobe", "-r", self.GADGET], capture_output=True)
         try:
-            subprocess.run(["mkfs.vfat", "-F", "32", "-n", "PHOTOS", src], check=True,
-                           capture_output=True)
-        finally:
-            subprocess.run(["mount", str(mount)], check=True)
+            self._run("modprobe", self.GADGET, f"file={image}", "removable=1", "ro=0", "stall=0")
+        except RuntimeError:
+            subprocess.run(["mount", str(mount)], capture_output=True)  # don't leave photos unmounted
+            raise
+
+    def usb_export_stop(self, mount: Path, image: Path) -> None:
+        """Take the drive back from the USB host, check it and mount it again."""
+        subprocess.run(["modprobe", "-r", self.GADGET], capture_output=True)
+        # The computer may have been unplugged without ejecting: repair the FAT if needed.
+        fsck = subprocess.run(["fsck.vfat", "-a", str(image)], capture_output=True, text=True)
+        if fsck.returncode not in (0, 1):
+            log.warning("fsck.vfat returned %d: %s", fsck.returncode, fsck.stdout[-300:])
+        self._run("mount", str(mount))
+
+    def usb_state(self) -> str:
+        """USB device-port state: 'configured' when a computer is using the drive."""
+        for state in sorted(Path("/sys/class/udc").glob("*/state")):
+            try:
+                return state.read_text().strip()
+            except OSError:
+                pass
+        return "no-udc"
 
 
 class SimSystem(System):
     def shutdown(self) -> None:
         pass
 
-    def format_partition(self, storage: Storage) -> None:
-        import shutil
+    def usb_export_start(self, mount: Path, image: Path) -> None:
+        pass
 
-        shutil.rmtree(storage.dcim, ignore_errors=True)
+    def usb_export_stop(self, mount: Path, image: Path) -> None:
+        pass
+
+    def usb_state(self) -> str:
+        return "configured"
 
 
 def read_temperature() -> Optional[float]:
@@ -113,6 +145,8 @@ class App:
         self.settings_path = settings_path
         self.system = system or System()
         self.now = clock
+        self._require_mount = require_mount
+        self.photo_image = PHOTO_IMAGE
         self.storage = Storage(settings.photo_dir, require_mount)
         self.buttons = ButtonTracker()
         self.screen: Screen = LiveView(self)
@@ -143,9 +177,9 @@ class App:
         i = self.camera.info
         log.info("omnicam %s: camera %s %s, max exposure %.2fs, max gain %.1f, storage %s (%s)",
                  __version__, i.model, i.resolution, i.max_exposure_s, i.max_gain,
-                 self.storage.root, "RAM" if self.storage.in_ram else "partition")
+                 self.storage.root, "RAM" if self.storage.in_ram else "photo image")
         if self.storage.in_ram:
-            self.toast("No photo partition: saving to RAM", ui.RED, 4)
+            self.toast("No photo storage: saving to RAM", ui.RED, 4)
 
     def run(self) -> None:
         self.start()
@@ -352,7 +386,10 @@ class App:
             self.toast(f"Error: {job.error}"[:40], ui.RED, 3)
             if job.kind == "frame":
                 self.stop_timelapse(message="Timelapse stopped (error)")
-            elif job.kind == "format":
+            elif job.kind == "export_start":
+                self.back_to_live()
+            elif job.kind in ("export_stop", "erase"):
+                self.reload_storage()
                 self.back_to_live()
             return
         if job.kind == "photo":
@@ -415,9 +452,9 @@ class App:
         if action == "storage_info":
             used, total = self.storage.usage()
             gb = 1024 ** 3
-            where = ("Photo partition" if self.storage.on_partition
-                     else "No photo partition: in RAM, lost at power-off")
-            lines = [where, str(self.storage.root),
+            where = (f"Photo storage: {self.photo_image}" if self.storage.mounted
+                     else "No photo storage: in RAM, lost at power-off")
+            lines = [where, f"Mounted at {self.storage.root}",
                      f"Used {used / gb:.1f} of {total / gb:.1f} GB",
                      f"Entries: {len(self.storage.entries())}",
                      f"About {self.shots_left()} shots left"]
@@ -432,28 +469,58 @@ class App:
                      f"Shutter: {format_shutter(shutters[0])} – {format_shutter(shutters[-1])}",
                      f"ISO: {iso_steps(i.max_gain)[0]} – {iso_steps(i.max_gain)[-1]}"]
             self.open(InfoView(self, "Camera", lines, back=menu))
-        elif action == "format":
-            if not self.storage.on_partition:
-                self.open(InfoView(self, "Format", ["The photo partition is not mounted, so there "
-                                                    "is nothing to format."], back=menu))
+        elif action == "usb_export":
+            if self.storage.in_ram:
+                self.open(InfoView(self, "USB export", [
+                    "Photos are in RAM because the photo storage isn't mounted, so "
+                    "there is nothing to export over USB."], back=menu))
                 return
-            self.open(ConfirmView(self, "Erase ALL photos on the photo partition?", "Format",
-                                  self._format, back=menu))
+            self.start_export()
+        elif action == "erase":
+            self.open(ConfirmView(self, "Erase ALL photos?", "Erase", self._erase, back=menu))
         elif action == "shutdown":
             msg = "Shut down the camera?"
             if self.storage.in_ram and self.storage.entries():
                 msg = "Photos in RAM will be lost. Shut down anyway?"
             self.open(ConfirmView(self, msg, "Shut down", self._shutdown, back=menu))
 
-    def _format(self) -> None:
-        self.open(BusyView(self, "Formatting"))
+    # ---- storage --------------------------------------------------------
+    def reload_storage(self) -> None:
+        self.storage = Storage(self.s.photo_dir, self._require_mount)
+        self.refresh_storage()
+
+    def start_export(self) -> None:
+        log.info("USB export: start")
+        self.open(ExportView(self))
+        self.job = Job("export_start", lambda: self.system.usb_export_start(
+            self.storage.requested, self.photo_image), self.now())
+
+    def stop_export(self) -> None:
+        if self.busy:
+            return
+        log.info("USB export: stop")
+        self.open(BusyView(self, "Checking photos"))
 
         def done():
-            self.toast("Photo partition formatted", ui.GREEN)
+            self.reload_storage()
+            self.toast("Photos back on the camera", ui.GREEN)
             self.back_to_live()
 
-        self.job = Job("format", lambda: self.system.format_partition(self.storage), self.now(),
-                       on_done=done)
+        self.job = Job("export_stop", lambda: self.system.usb_export_stop(
+            self.storage.requested, self.photo_image), self.now(), on_done=done)
+
+    def _erase(self) -> None:
+        import shutil
+
+        self.open(BusyView(self, "Erasing"))
+
+        def done():
+            self.reload_storage()
+            self.toast("All photos erased", ui.GREEN)
+            self.back_to_live()
+
+        self.job = Job("erase", lambda: shutil.rmtree(self.storage.dcim, ignore_errors=True),
+                       self.now(), on_done=done)
 
     def _shutdown(self) -> None:
         img, d = ui.panel_screen("Goodbye")

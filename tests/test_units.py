@@ -135,7 +135,7 @@ def test_storage_naming_listing_and_delete(tmp_path):
 
 def test_storage_falls_back_to_ram_when_not_mounted(tmp_path):
     st = Storage(str(tmp_path / "not-a-mount"), require_mount=True)
-    assert not st.on_partition and st.in_ram
+    assert not st.mounted and st.in_ram
     assert str(st.root).startswith("/dev/shm/")
 
 

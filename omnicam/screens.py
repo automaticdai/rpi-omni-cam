@@ -410,6 +410,42 @@ class InfoView(Screen):
         return img
 
 
+class ExportView(Screen):
+    """USB export: the photo storage is a USB drive on the connected computer."""
+
+    def on_button(self, ev: ButtonEvent) -> None:
+        if ev.kind == PRESS and ev.button == "X":
+            self.app.stop_export()
+
+    def render(self) -> Image.Image:
+        app = self.app
+        img, d = ui.panel_screen("USB export")
+        f, fb = ui.font(14), ui.font(16, "bold")
+        if app.job and app.job.kind == "export_start":
+            ui.centered(d, 100, "Preparing…", fb)
+            return img
+        state = app.system.usb_state()
+        if state == "configured":
+            head, col = "Connected", ui.GREEN
+            body = ("Your computer shows a drive named PHOTOS. Eject it there "
+                    "before pressing X.")
+        elif state == "no-udc":
+            head, col = "USB device mode not enabled", ui.RED
+            body = "Add dtoverlay=dwc2 to config.txt (install.sh does this) and reboot."
+        else:
+            head, col = "Waiting for a computer", ui.ACCENT
+            body = ("Connect the camera's USB data port (the inner micro-USB, "
+                    "marked USB) to a computer.")
+        ui.centered(d, 44, head, fb, col)
+        y = 76
+        for line in ui.wrap(d, body, f, ui.W - 30):
+            ui.centered(d, y, line, f)
+            y += 20
+        ui.centered(d, ui.H - 46, "No photos can be taken during export.", ui.font(12), ui.GREY)
+        ui.hints(d, "", "X stop export")
+        return img
+
+
 class BusyView(Screen):
     def __init__(self, app: "App", message: str):
         super().__init__(app)

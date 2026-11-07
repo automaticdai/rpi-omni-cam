@@ -9,8 +9,8 @@ from omnicam import exif
 from omnicam.app import App, SimSystem
 from omnicam.camera import SimCamera
 from omnicam.config import Settings
-from omnicam.screens import (ConfirmView, InfoView, LiveView, MenuView,
-                             PlaybackView, ReviewView)
+from omnicam.screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
+                             MenuView, PlaybackView, ReviewView)
 
 
 class FakeDisplay:
@@ -215,14 +215,14 @@ def test_self_timer(rig):
 
 def test_system_info_screens(rig):
     rig.long("A")
-    for _ in range(4):
+    for _ in range(5):
         rig.press("B")      # System
     rig.press("Y")
     rig.press("Y")          # Storage info
     assert isinstance(rig.app.screen, InfoView)
     rig.press("X")
     assert isinstance(rig.app.screen, MenuView)
-    rig.press("B")          # Format photo partition
+    rig.press("B")          # Erase all photos
     rig.press("B")          # Camera info
     rig.press("Y")
     info = rig.app.screen
@@ -257,6 +257,52 @@ def test_ram_fallback_saves_to_ram_and_refuses_when_full(tmp_path, monkeypatch):
     app.take_photo()
     assert not app.busy
     assert "RAM full" in app._toast[0]
+
+
+def test_usb_export_round_trip(rig):
+    calls = []
+    sysm = rig.app.system
+    sysm.usb_export_start = lambda mount, image: calls.append(("start", mount, image))
+    sysm.usb_export_stop = lambda mount, image: calls.append(("stop", mount, image))
+    rig.press("X")
+    rig.finish_job()
+    rig.tick(2)
+    rig.long("A")
+    for _ in range(4):
+        rig.press("B")      # USB export
+    rig.press("Y")
+    assert isinstance(rig.app.screen, ExportView)
+    rig.finish_job()
+    assert calls and calls[0][0] == "start"
+    rig.press("A")          # ignored: no shooting during export
+    rig.press("X")          # stop export
+    rig.finish_job()
+    assert [c[0] for c in calls] == ["start", "stop"]
+    assert isinstance(rig.app.screen, LiveView)
+    assert len(rig.photos()) == 1
+
+
+def test_usb_export_refused_when_photos_are_in_ram(tmp_path, monkeypatch):
+    import omnicam.storage as storage
+
+    monkeypatch.setattr(storage, "FALLBACK_DIR", tmp_path / "ram")
+    app = App(SimCamera(), FakeDisplay(), Settings(photo_dir=str(tmp_path / "nope"), screen_off=0),
+              settings_path=tmp_path / "s.json", require_mount=True, system=SimSystem(),
+              clock=Clock())
+    app.run_action("usb_export")
+    assert isinstance(app.screen, InfoView) and not app.busy
+
+
+def test_erase_all_photos(rig):
+    rig.press("X")
+    rig.finish_job()
+    rig.tick(2)
+    assert rig.photos()
+    rig.app.run_action("erase")
+    rig.press("Y")          # confirm
+    rig.finish_job()
+    assert not rig.photos()
+    assert isinstance(rig.app.screen, LiveView)
 
 
 def test_screen_off_and_wake(tmp_path, monkeypatch):

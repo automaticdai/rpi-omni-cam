@@ -54,17 +54,28 @@ gain. A 1 s exposure shows a countdown.
 - **Menu:** Mode (top-level choice), Shooting (white balance, exposure compensation, filter, JPEG
   quality, save RAW, self-timer), Timelapse (interval, shots, exposure lock),
   Display (grid, histogram, brightness, screen-off timer), System (storage
-  info, format photo partition, camera info, shut down).
+  info, erase all photos, camera info, shut down), USB export.
 - **Playback:** newest first; filename, date, exposure info from EXIF. X
   toggles 100 % centre crop, hold X deletes (with confirmation). A timelapse
   sequence appears as one entry; deleting it deletes the whole sequence.
 
-## Storage (decided)
+## Storage (decided, revised after hardware testing)
 
-Photos live on a separate FAT32 partition (label `PHOTOS`) readable by any
-card reader, mounted at `/media/photos`. Layout:
+No partitioning. Photos are saved on the SD card's root filesystem inside a
+FAT32 disk-image file (`/var/lib/omnicam/photos.img`, created by install.sh,
+default half the free space up to 32 GB), loop-mounted at `/media/photos` via
+fstab. Layout:
 `DCIM/YYYY-MM-DD/IMG_NNNN.jpg`, timelapses `DCIM/YYYY-MM-DD/TL_NNNN/FRAME_NNNNN.jpg`.
-If the partition is not mounted the app saves to RAM (`/dev/shm`, decided):
+
+Export is over the Pi Zero 2's micro-USB data port as a USB mass-storage device
+(`dtoverlay=dwc2,dr_mode=peripheral`, `g_mass_storage`). USB mass storage shares
+a block device, not a folder — hence the image file. Menu › USB export unmounts
+the image and loads the gadget with it; X stops the export: unload gadget,
+`fsck.vfat -a` (the host may have been unplugged without ejecting), remount.
+The camera cannot shoot during export (two writers on one FAT would corrupt it).
+"Erase all photos" deletes DCIM instead of reformatting.
+
+If the image is not mounted the app saves to RAM (`/dev/shm`, decided):
 photos are lost at power-off, a red RAM marker is shown, shutdown warns, and
 RAM use is capped (128 MB budget, 192 MB of memory always left available) so
 capture can't run the Zero 2 out of memory. It never writes into the root
@@ -87,9 +98,4 @@ Video recording, Wi-Fi transfer, focus peaking, battery gauge.
 - Preview exposure is capped at 1/15 s; a longer shutter is simulated in the
   preview with extra gain where possible.
 - Timelapse exposure lock freezes exposure and white-balance gains at start.
-- Partition creation runs on the Pi itself (scripts/partition-on-pi.sh): the user
-  disables the first-boot root expansion in cmdline.txt, then the script grows
-  root to a fixed size online and adds PHOTOS. Fallback for already-expanded
-  cards: scripts/partition-from-pc.sh, run on a Linux machine against the
-  card after the Pi's first boot (root fs already expanded), because Pi OS
-  expands the root partition over the whole card on first boot.
+- Partitioning was dropped in favour of the image file + USB export (see Storage).
