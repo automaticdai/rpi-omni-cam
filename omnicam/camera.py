@@ -78,7 +78,16 @@ class PiCamera:
         props = self.cam.camera_properties
         ctrls = self.cam.camera_controls
         sensor = tuple(props["PixelArraySize"])
+        # camera_controls["ExposureTime"] only reflects the default frame
+        # duration (e.g. 66 ms = 1/15 s), not what the sensor can do; the
+        # per-mode exposure_limits do.
         _, max_exp_us, _ = ctrls["ExposureTime"]
+        try:
+            mode_max = max(m["exposure_limits"][1] for m in self.cam.sensor_modes
+                           if m.get("exposure_limits"))
+            max_exp_us = max(max_exp_us, mode_max)
+        except (KeyError, TypeError, ValueError):
+            pass
         _, max_gain, _ = ctrls["AnalogueGain"]
         self.info = CameraInfo(
             model=str(props.get("Model", "unknown")),

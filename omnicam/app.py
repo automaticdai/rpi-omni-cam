@@ -14,11 +14,11 @@ from typing import Any, Callable, Optional
 
 from PIL import Image
 
-from . import exif, filters, ui
+from . import __version__, exif, filters, ui
 from .buttons import ButtonTracker
 from .camera import FrameMeta
 from .config import DEFAULT_CONFIG_PATH, Settings
-from .exposure import EV_STEPS, iso_steps, shutter_steps, step
+from .exposure import EV_STEPS, format_shutter, iso_steps, shutter_steps, step
 from .screens import (BusyView, ConfirmView, InfoView, LiveView, MenuView,
                       ReviewView, Screen)
 from .storage import Storage
@@ -140,7 +140,9 @@ class App:
         self.camera.start()
         self.camera.apply(self.s)
         self.display.set_backlight(self.s.brightness / 100)
-        log.info("camera %s %s, storage %s (%s)", self.camera.info.model, self.camera.info.resolution,
+        i = self.camera.info
+        log.info("omnicam %s: camera %s %s, max exposure %.2fs, max gain %.1f, storage %s (%s)",
+                 __version__, i.model, i.resolution, i.max_exposure_s, i.max_gain,
                  self.storage.root, "RAM" if self.storage.in_ram else "partition")
         if self.storage.in_ram:
             self.toast("No photo partition: saving to RAM", ui.RED, 4)
@@ -423,10 +425,12 @@ class App:
         elif action == "camera_info":
             i = self.camera.info
             mp = i.resolution[0] * i.resolution[1] / 1e6
-            lines = [f"Sensor: {i.model}",
+            shutters = shutter_steps(i.max_exposure_s)
+            lines = [f"App: omnicam {__version__}",
+                     f"Sensor: {i.model}",
                      f"Resolution: {i.resolution[0]}×{i.resolution[1]} ({mp:.1f} MP)",
-                     f"Longest exposure: {i.max_exposure_s:.0f} s",
-                     f"Max ISO: {iso_steps(i.max_gain)[-1]}"]
+                     f"Shutter: {format_shutter(shutters[0])} – {format_shutter(shutters[-1])}",
+                     f"ISO: {iso_steps(i.max_gain)[0]} – {iso_steps(i.max_gain)[-1]}"]
             self.open(InfoView(self, "Camera", lines, back=menu))
         elif action == "format":
             if not self.storage.on_partition:

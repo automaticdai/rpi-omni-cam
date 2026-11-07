@@ -222,6 +222,14 @@ def test_system_info_screens(rig):
     assert isinstance(rig.app.screen, InfoView)
     rig.press("X")
     assert isinstance(rig.app.screen, MenuView)
+    rig.press("B")          # Format photo partition
+    rig.press("B")          # Camera info
+    rig.press("Y")
+    info = rig.app.screen
+    assert isinstance(info, InfoView)
+    from omnicam import __version__
+    assert info.lines[0] == f"App: omnicam {__version__}"
+    assert any(line.startswith("Shutter: 1/4000 – 1\"") for line in info.lines)
 
 
 def test_ram_fallback_saves_to_ram_and_refuses_when_full(tmp_path, monkeypatch):
