@@ -140,6 +140,9 @@ function (defaults Playback / Magnify; hold may be None). SETUP: B press,
 B hold, Brightness, Screen off, Storage ›, About › (Camera info, Reset
 settings, Shut down).
 
+Power hold (revised): holding Y 3 s turns the camera off only from the live
+view; on other screens it is ignored. Turning on from standby is unchanged.
+
 ## Builder's calls
 
 - Filters: None, B&W, Sepia, High Contrast, Vivid, Cool, Warm, Vintage.

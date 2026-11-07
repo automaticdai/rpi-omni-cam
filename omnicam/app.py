@@ -228,11 +228,14 @@ class App:
             events = [e for e in events if e.kind == POWER]
             if not self.buttons.any_down():
                 self._swallow = False
+        home = self.screen is self._live
         for ev in events:
             if ev.kind == POWER:
-                self.power_off()
-                return
-            if ev.button == "Y" and ev.kind == LONG:
+                if home:  # the 3 s power hold only works from the live view
+                    self.power_off()
+                    return
+                continue
+            if ev.button == "Y" and ev.kind == LONG and home:
                 self.toast("Keep holding Y to turn off", ui.ACCENT, 2.4)
             self._last_activity = now
             log.info("button %s %s on %s", ev.button, ev.kind, type(self.screen).__name__)
@@ -282,9 +285,6 @@ class App:
             self.toast("No photo storage: saving to RAM", ui.RED, 4)
 
     def power_off(self) -> None:
-        if isinstance(self.screen, ConfirmView):
-            # e.g. holding Y in playback to delete: don't also power off
-            return
         if isinstance(self.screen, ExportView):
             self.toast("Stop USB export first", ui.RED, 2.5)
             return

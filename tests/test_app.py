@@ -598,17 +598,30 @@ def test_every_menu_screen_renders(rig):
     rig.press("A")
 
 
-def test_holding_y_on_delete_prompt_does_not_power_off(rig):
+def test_power_hold_only_works_from_live_view(rig):
     rig.press("X")
     rig.finish_job()
     rig.tick(2)
-    rig.press("B")          # playback
-    rig.display.held = {"Y"}
-    for _ in range(40):     # hold Y for 4 s: delete prompt at 0.7 s, power hold at 3 s
-        rig.tick(0.1)
-    rig.display.held = set()
-    rig.tick(0.05)
+
+    def hold_y():
+        rig.display.held = {"Y"}
+        for _ in range(35):     # 3.5 s
+            rig.tick(0.1)
+        rig.display.held = set()
+        rig.tick(0.05)
+
+    rig.press("B")              # playback: holding Y opens the delete prompt, never powers off
+    hold_y()
     assert rig.app.powered and isinstance(rig.app.screen, ConfirmView)
+    rig.press("X")              # cancel
+    rig.press("X")              # back to live view
+    rig.long("A")               # full menu
+    hold_y()
+    assert rig.app.powered and isinstance(rig.app.screen, MenuView)
+    rig.press("X")
+    assert isinstance(rig.app.screen, LiveView)
+    hold_y()                    # home: turns off
+    assert not rig.app.powered
 
 
 def test_info_screen_fits_long_text(rig):

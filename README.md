@@ -90,16 +90,16 @@ focus aids, filters, timelapse, on-camera playback, and USB export of your photo
 | **A** | quick menu · **hold:** full menu | move up / previous · **hold:** jump |
 | **B** | function · **hold:** second function | move down / next · **hold:** jump |
 | **X** | take photo · **hold:** start / stop timelapse | back · close · cancel |
-| **Y** | adjust exposure · **hold 3 s:** on / off | choose · confirm · change |
+| **Y** | adjust exposure · **hold 3 s:** off | choose · confirm · change |
 
 The rule everywhere: **Y** chooses, **X** goes back, **A/B** move (or change a
 value while editing).
 
 **On / off:** the camera starts in standby when the Pi boots. Hold **Y** for
-3 s to turn it on (welcome screen, then live view) or off (screen dark, camera
-stopped, settings saved). This is a standby — **Menu › SETUP › About › Shut down**
-powers the Pi off. Turning off is refused during USB export, and holding Y on a
-confirmation prompt never powers off.
+3 s to turn it on (welcome screen, then live view). To turn it off, hold **Y**
+for 3 s **in the live view** (screen dark, camera stopped, settings saved); on
+other screens — menus, playback, dialogs — holding Y never powers off. This is a
+standby — **Menu › SETUP › About › Shut down** powers the Pi off.
 
 ### The live view
 
