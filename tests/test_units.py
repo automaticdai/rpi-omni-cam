@@ -54,7 +54,7 @@ def test_steps_are_limited_by_sensor():
 
 def test_mode_decides_which_values_are_manual():
     s = Settings(shutter=1 / 60, iso=400)
-    expected = {"P": (None, None), "Tv": (1 / 60, None), "Sv": (None, 400), "M": (1 / 60, 400)}
+    expected = {"P": (None, None), "A": (None, 400), "S": (1 / 60, None), "M": (1 / 60, 400)}
     for mode, values in expected.items():
         s.mode = mode
         assert (s.exp_shutter, s.exp_iso) == values
@@ -110,6 +110,10 @@ def test_settings_roundtrip_and_bad_file(tmp_path):
     p.write_text(json.dumps({"shutter": None, "iso": None, "mode": "bogus"}))
     s = Settings.load(p)
     assert s.shutter and s.iso and s.mode == "P"
+    p.write_text(json.dumps({"mode": "Tv"}))      # pre-0.3 mode names
+    assert Settings.load(p).mode == "S"
+    p.write_text(json.dumps({"mode": "Sv"}))
+    assert Settings.load(p).mode == "A"
     p.write_text(json.dumps({"shutter": 8}))       # from before the 1 s cap
     assert Settings.load(p).shutter == 1
 

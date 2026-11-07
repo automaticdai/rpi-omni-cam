@@ -133,8 +133,8 @@ def test_exposure_buttons_follow_mode(rig):
     for _ in range(8):
         rig.press("B")
     assert s.iso == 100 and s.exp_iso == 100
-    # Tv: shutter and EV; ISO is automatic
-    rig.app.set_setting("mode", "Tv")
+    # S: shutter and EV; ISO is automatic
+    rig.app.set_setting("mode", "S")
     assert live.selected == "shutter" and s.exp_iso is None
     rig.press("Y")
     assert live.selected == "ev"
@@ -143,8 +143,8 @@ def test_exposure_buttons_follow_mode(rig):
 def test_mode_is_set_from_menu(rig):
     rig.long("A")
     rig.press("Y")          # Mode (first item of the top menu)
-    rig.press("B")
-    rig.press("B")
+    rig.press("B")          # A
+    rig.press("B")          # S
     rig.press("B")          # M
     rig.press("Y")          # choose
     assert rig.settings.mode == "M"

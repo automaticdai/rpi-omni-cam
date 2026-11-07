@@ -33,11 +33,11 @@ def nearest(values: Sequence[float], target: float) -> float:
 
 
 # Mode -> values the A/B buttons adjust in live view (Y cycles between them).
-MODES = ("P", "Tv", "Sv", "M")
+MODES = ("P", "A", "S", "M")  # Sony naming and order
 MODE_PARAMS: dict[str, tuple[str, ...]] = {
     "P": ("ev",),
-    "Tv": ("shutter", "ev"),
-    "Sv": ("iso", "ev"),
+    "A": ("iso", "ev"),   # aperture priority: aperture on the lens ring, ISO here
+    "S": ("shutter", "ev"),
     "M": ("shutter", "iso"),
 }
 

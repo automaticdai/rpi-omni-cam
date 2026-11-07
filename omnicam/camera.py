@@ -54,7 +54,7 @@ def preview_exposure(settings: Settings, max_gain: float) -> tuple[Optional[floa
     if shutter is None or shutter <= PREVIEW_MAX_EXPOSURE_S:
         return shutter, gain, 0.0
     lost = shutter / PREVIEW_MAX_EXPOSURE_S
-    if gain is None:  # Tv: AE will raise the gain itself
+    if gain is None:  # S mode: AE will raise the gain itself
         return PREVIEW_MAX_EXPOSURE_S, None, 0.0
     boosted = min(gain * lost, max_gain)
     return PREVIEW_MAX_EXPOSURE_S, boosted, math.log2(gain * lost / boosted)

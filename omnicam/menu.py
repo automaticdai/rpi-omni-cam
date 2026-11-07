@@ -50,8 +50,8 @@ def _seconds(v: int) -> str:
 
 MENU: list[Item] = [
     Choice("Mode", "mode", [
-        ("P", "P · Program"), ("Tv", "Tv · Shutter priority"),
-        ("Sv", "Sv · ISO priority"), ("M", "M · Manual")]),
+        ("P", "P · Program"), ("A", "A · Aperture priority"),
+        ("S", "S · Shutter priority"), ("M", "M · Manual")]),
     Section("Shooting", [
         Choice("White balance", "wb", [
             ("auto", "Auto"), ("daylight", "Daylight"), ("cloudy", "Cloudy"),

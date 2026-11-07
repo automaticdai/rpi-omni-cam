@@ -5,7 +5,7 @@ Zero 2 W, a Raspberry Pi camera and a Pimoroni Display HAT Mini.
 
 - Live colour preview with shutter speed / ISO / white balance / filter readout,
   an exposure meter, optional grid and histogram
-- P / Tv / Sv / M exposure modes (chosen in the menu), with the mode's values
+- P / A / S / M exposure modes (Sony naming, chosen in the menu), with the mode's values
   and exposure compensation adjusted straight from live view
 - Full-resolution JPEG capture, optional RAW (DNG), shutter speeds 1/4000 – 1 s
 - Filters: B&W, Sepia, High Contrast, Vivid, Cool, Warm, Vintage (baked into the JPEG)
@@ -41,14 +41,15 @@ auto-exposure are shown in grey.
 
 | Mode | Shutter | ISO  | Y switches between |
 |------|---------|------|--------------------|
-| **P**  (program)          | auto | auto | EV only |
-| **Tv** (shutter priority) | set  | auto | shutter ↔ EV |
-| **Sv** (ISO priority)     | auto | set  | ISO ↔ EV |
-| **M**  (manual)           | set  | set  | shutter ↔ ISO |
+| **P**  (program)           | auto | auto | EV only |
+| **A**  (aperture priority) | auto | set  | ISO ↔ EV |
+| **S**  (shutter priority)  | set  | auto | shutter ↔ EV |
+| **M**  (manual)            | set  | set  | shutter ↔ ISO |
 
 EV is exposure compensation (−2 … +2): it tells auto-exposure to make the
-picture darker or brighter. There is no aperture mode, since the Pi cameras
-have no electronically controlled aperture.
+picture darker or brighter. In **A** you set the aperture on the lens ring (HQ
+camera; the other Pi cameras have a fixed aperture) and the ISO with A/B, and
+the camera picks the shutter speed.
 
 In the menu: **A/B** move (hold to scroll), **Y** selects, **X** goes back.
 Confirmation dialogs (delete, format, shut down): **Y** confirms, **X** cancels.

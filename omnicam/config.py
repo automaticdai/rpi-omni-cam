@@ -15,7 +15,8 @@ DEFAULT_CONFIG_PATH = Path(
 
 @dataclass
 class Settings:
-    # Exposure. mode: P (all auto), Tv (shutter set), Sv (ISO set), M (both set).
+    # Exposure mode, Sony naming: P (all auto), A (aperture priority: ISO set,
+    # aperture on the lens ring, shutter auto), S (shutter set), M (both set).
     # shutter/iso hold the manual values; they only apply in modes that use them.
     mode: str = "P"
     shutter: float = 1 / 125  # seconds
@@ -53,7 +54,8 @@ class Settings:
         for f in fields(cls):
             if f.name in data:
                 setattr(settings, f.name, data[f.name])
-        if settings.mode not in ("P", "Tv", "Sv", "M"):
+        settings.mode = {"Tv": "S", "Sv": "A"}.get(settings.mode, settings.mode)  # pre-0.3 names
+        if settings.mode not in ("P", "A", "S", "M"):
             settings.mode = defaults.mode
         if not settings.shutter:  # older files stored None for AUTO
             settings.shutter = defaults.shutter
@@ -66,12 +68,12 @@ class Settings:
     @property
     def exp_shutter(self) -> Optional[float]:
         """Shutter to use, or None when the mode leaves it to auto-exposure."""
-        return self.shutter if self.mode in ("Tv", "M") else None
+        return self.shutter if self.mode in ("S", "M") else None
 
     @property
     def exp_iso(self) -> Optional[int]:
         """ISO to use, or None when the mode leaves it to auto-exposure."""
-        return self.iso if self.mode in ("Sv", "M") else None
+        return self.iso if self.mode in ("A", "M") else None
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
         path = Path(path)
