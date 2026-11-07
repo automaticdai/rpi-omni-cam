@@ -91,8 +91,11 @@ def meter(d: ImageDraw.ImageDraw, ev: float, y: int) -> None:
     d.text((cx + half + 12, y), "+", font=f, fill=WHITE)
     for i in range(-6, 7):
         x = cx + i * half // 6
-        tall = i % 3 == 0
-        d.line([(x, y + (2 if tall else 5)), (x, y + 8)], fill=WHITE)
+        if i == 0:  # correct exposure: bold, full-height centre mark
+            d.rectangle([x - 1, y - 1, x + 1, y + 9], fill=WHITE)
+        else:
+            tall = i % 3 == 0
+            d.line([(x, y + (2 if tall else 5)), (x, y + 8)], fill=WHITE)
     clamped = max(-2.2, min(2.2, ev))
     mx = cx + int(clamped / 2 * half)
     col = ACCENT if abs(ev) <= 2 else RED

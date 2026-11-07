@@ -7,8 +7,9 @@ from typing import Optional, Sequence
 
 SHUTTER_STEPS: tuple[float, ...] = (
     1 / 4000, 1 / 2000, 1 / 1000, 1 / 500, 1 / 250, 1 / 125, 1 / 60, 1 / 30,
-    1 / 15, 1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 15, 30, 60,
+    1 / 15, 1 / 8, 1 / 4, 1 / 2, 1,
 )
+MAX_SHUTTER_S = SHUTTER_STEPS[-1]  # longest shutter offered (1 s)
 ISO_STEPS: tuple[int, ...] = (100, 200, 400, 800, 1600, 3200)
 EV_STEPS: tuple[float, ...] = (-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
 

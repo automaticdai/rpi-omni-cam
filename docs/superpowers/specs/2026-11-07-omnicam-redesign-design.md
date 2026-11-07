@@ -41,9 +41,9 @@ browse, X zoom, hold X delete, Y back to live view.
 Exposure (revised after hardware testing, decided): the mode — P (both auto),
 Tv (shutter set), Sv (ISO set), M (both set) — is chosen in the menu (first item of the top level, not a sub-menu). A/B adjust
 only the mode's values and stop at the ends of the range (no AUTO step): P → EV
-compensation; Tv → shutter ↔ EV; Sv → ISO ↔ EV; M → shutter ↔ ISO. Shutter steps are full stops 1/4000 … 60 s, clipped to the sensor's
+compensation; Tv → shutter ↔ EV; Sv → ISO ↔ EV; M → shutter ↔ ISO. Shutter steps are full stops 1/4000 … 1 s (capped at 1 s after hardware testing), clipped to the sensor's
 maximum. ISO = 100 × analogue gain, full stops, clipped to the sensor's max
-gain. Long exposures show a countdown.
+gain. A 1 s exposure shows a countdown.
 
 ## Screens
 

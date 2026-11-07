@@ -46,7 +46,8 @@ def test_ev_steps_linearly_including_negative():
 
 
 def test_steps_are_limited_by_sensor():
-    assert max(shutter_steps(11.7)) == 8          # camera module v2
+    assert max(shutter_steps(11.7)) == 1          # capped at 1 s
+    assert max(shutter_steps(0.5)) == 0.5         # ...or the sensor's limit if lower
     assert max(iso_steps(10.66)) == 800
     assert max(iso_steps(22.26)) == 1600          # HQ camera
 
@@ -109,6 +110,8 @@ def test_settings_roundtrip_and_bad_file(tmp_path):
     p.write_text(json.dumps({"shutter": None, "iso": None, "mode": "bogus"}))
     s = Settings.load(p)
     assert s.shutter and s.iso and s.mode == "P"
+    p.write_text(json.dumps({"shutter": 8}))       # from before the 1 s cap
+    assert Settings.load(p).shutter == 1
 
 
 # ---- storage -----------------------------------------------------------

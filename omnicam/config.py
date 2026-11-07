@@ -57,6 +57,8 @@ class Settings:
             settings.mode = defaults.mode
         if not settings.shutter:  # older files stored None for AUTO
             settings.shutter = defaults.shutter
+        from .exposure import MAX_SHUTTER_S
+        settings.shutter = min(settings.shutter, MAX_SHUTTER_S)
         if not settings.iso:
             settings.iso = defaults.iso
         return settings

@@ -7,7 +7,7 @@ Zero 2 W, a Raspberry Pi camera and a Pimoroni Display HAT Mini.
   an exposure meter, optional grid and histogram
 - P / Tv / Sv / M exposure modes (chosen in the menu), with the mode's values
   and exposure compensation adjusted straight from live view
-- Full-resolution JPEG capture, optional RAW (DNG), long exposures with countdown
+- Full-resolution JPEG capture, optional RAW (DNG), shutter speeds 1/4000 – 1 s
 - Filters: B&W, Sepia, High Contrast, Vivid, Cool, Warm, Vintage (baked into the JPEG)
 - Self-timer, timelapse with exposure lock
 - On-camera playback with 100 % zoom and delete
