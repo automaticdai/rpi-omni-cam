@@ -1,0 +1,16 @@
+[Unit]
+Description=omnicam camera UI
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+Environment=OMNICAM_CONFIG=/var/lib/omnicam/settings.json
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@REPO@/.venv/bin/python -m omnicam
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
