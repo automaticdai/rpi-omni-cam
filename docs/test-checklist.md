@@ -18,11 +18,11 @@ Display HAT Mini). Ticked items have been tried on the camera and confirmed in t
 - [ ] Night mode: Drive › Night · 4 frames (and 8) in dim light; one photo, less grain
 - [ ] Double exposure: Drive › Double exposure; first shot shows faintly over the view,
       second shot blends; hold X after the first shot cancels
-- [ ] Long exposures: SHOOT › Long exposures On; in S or M mode, shutter 2, 4 and 8 s
+- [ ] Long exposures: CAM › Long exposures On; in S or M mode, shutter 2, 4 and 8 s
 
 ### Video
-- [ ] Slow motion: Mode › S&Q; record, then play back; VIDEO tab at 120 and 200 fps
-- [ ] 720p video: VIDEO tab › Video size 720p
+- [ ] Slow motion: Mode › S&Q; record, then play back; VID tab at 120 and 200 fps
+- [ ] 720p video: VID tab › Video size 720p
 - [ ] Timelapse to MP4: Interval 1 s, about 15 frames; "MP4 …%" in the top bar,
       then play it in playback
 

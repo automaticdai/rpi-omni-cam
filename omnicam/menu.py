@@ -105,8 +105,8 @@ MODE = Choice("Mode", "mode", [
                 "A": "You set ISO (aperture on the lens); camera sets shutter",
                 "S": "You set the shutter; camera sets ISO",
                 "M": "You set shutter and ISO",
-                "MOVIE": "Video: X starts and stops recording (VIDEO tab: size)",
-                "SQ": "Slow-motion video at 640×480 (VIDEO tab: speed)"})
+                "MOVIE": "Video: X starts and stops recording (VID tab: size)",
+                "SQ": "Slow-motion video at 640×480 (VID tab: speed)"})
 DRIVE = Choice("Drive", "drive", [
     ("single", "Single"), ("burst5", "Burst ×5"), ("burst10", "Burst ×10"),
     ("bracket3_1", "Bracket 3 · ±1 EV"), ("bracket3_2", "Bracket 3 · ±2 EV"),
@@ -217,11 +217,11 @@ SCREEN_OFF = Choice("Screen off", "screen_off",
                     help="Turn the screen off after this long without a press")
 
 TABS: list[Tab] = [
-    Tab("SHOOT", [MODE, DRIVE, SELF_TIMER, EV, METERING, LONG_EXP]),
-    Tab("IMAGE", [FILTER, WB, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
+    Tab("CAM", [MODE, DRIVE, SELF_TIMER, EV, METERING, LONG_EXP]),
+    Tab("IMG", [FILTER, WB, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
     Tab("STYLE", [SHARPNESS, CONTRAST, SATURATION, NOISE]),
     Tab("FOCUS", [AF_MODE, PEAKING, ZEBRAS, GRID, HISTOGRAM]),
-    Tab("VIDEO", [VIDEO_SIZE, SQ_FPS]),
+    Tab("VID", [VIDEO_SIZE, SQ_FPS]),
     Tab("TL", [TL_INTERVAL, TL_COUNT, TL_LOCK, TL_VIDEO, TL_VIDEO_FPS,
                Action("Start timelapse", "timelapse_start", help="Hold X in the live view also starts/stops")]),
     Tab("SETUP", [

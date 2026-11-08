@@ -39,7 +39,7 @@ focus aids, filters, timelapse, on-camera playback, and USB export of your photo
 | | | |
 |:-:|:-:|:-:|
 | <img src="docs/screenshots/welcome.png" width="260"><br>Welcome (after holding Y) | <img src="docs/screenshots/live-view.png" width="260"><br>Live view: grid, histogram, meter | <img src="docs/screenshots/adjust.png" width="260"><br>M mode, adjusting the shutter (Y) |
-| <img src="docs/screenshots/quick-menu.png" width="260"><br>Quick menu (A) | <img src="docs/screenshots/quick-menu-edit.png" width="260"><br>Changing a tile in place | <img src="docs/screenshots/menu-shoot.png" width="260"><br>Full menu (hold A), SHOOT tab |
+| <img src="docs/screenshots/quick-menu.png" width="260"><br>Quick menu (A) | <img src="docs/screenshots/quick-menu-edit.png" width="260"><br>Changing a tile in place | <img src="docs/screenshots/menu-shoot.png" width="260"><br>Full menu (hold A), CAM tab |
 | <img src="docs/screenshots/menu-edit.png" width="260"><br>In-place editing with help line | <img src="docs/screenshots/menu-picker.png" width="260"><br>Picker for long lists | <img src="docs/screenshots/menu-setup.png" width="260"><br>SETUP tab |
 | <img src="docs/screenshots/focus-aids.png" width="260"><br>Peaking, zebras, 16:9 guides, diagonals | <img src="docs/screenshots/magnify.png" width="260"><br>Focus magnifier 2× | <img src="docs/screenshots/review.png" width="260"><br>Review after a shot (Vintage filter) |
 | <img src="docs/screenshots/playback.png" width="260"><br>Playback | <img src="docs/screenshots/timelapse.png" width="260"><br>Timelapse running | <img src="docs/screenshots/usb-export.png" width="260"><br>USB export |
@@ -117,7 +117,7 @@ standby — **Menu › SETUP › About › Shut down** powers the Pi off.
 
 ### Exposure modes and adjusting
 
-Choose the mode in the quick menu (first tile) or **Menu › SHOOT › Mode**.
+Choose the mode in the quick menu (first tile) or **Menu › CAM › Mode**.
 
 | Mode | Shutter | ISO | Y steps through |
 |------|---------|-----|-----------------|
@@ -148,19 +148,20 @@ menu, **hold A** opens the full menu. It reopens on the tile you used last.
 
 | Tab | Items |
 |-----|-------|
-| **SHOOT** | Mode, Drive, Self-timer, Exposure comp., Metering, White balance |
-| **IMAGE** | Filter, Image size, Aspect ratio, JPEG quality, Save RAW |
+| **CAM** | Mode, Drive, Self-timer, Exposure comp., Metering, Long exposures |
+| **IMG** | Filter, White balance, Image size, Aspect ratio, JPEG quality, Save RAW |
 | **STYLE** | Sharpness, Contrast, Saturation, Noise reduction |
 | **FOCUS** | Focus mode, Focus peaking, Highlight warning, Grid, Histogram |
-| **TL** | Interval, Shots, Exposure lock, Start timelapse |
-| **SETUP** | B press, B hold, Date & time, **Display ›** (Brightness, Screen off), **Storage ›** (Playback, USB export, Storage info, Erase all photos), **About ›** (Camera info, Reset settings, Shut down) |
+| **VID** | Video size, Slow-motion speed |
+| **TL** | Interval, Shots, Exposure lock, Make video, Video speed, Start timelapse |
+| **SETUP** | **Wi-Fi & Remote ›**, **Custom sets ›**, **Controls ›** (B press, B hold, Left-handed, Upside down), **Display ›**, **Storage ›**, **System ›** (Date & time, Camera info, Reset settings, Shut down) |
 
 - **A / B** move through the items; past the end of a tab you continue into the
   next one. **Hold A / B** to jump a whole tab.
 - **Y** on a setting: On/Off settings flip; short lists change in place
   (`◀ value ▶`, arrows turn grey at the ends; **Y** keeps, **X** cancels); long
   lists (Filter, Interval, Shots, B press/hold) open a picker.
-- **Y** on an action runs it; on *Display* / *Storage* / *About* it opens that page.
+- **Y** on an action runs it; on a page (marked ›) it opens that page.
 - **X** goes back. The help line at the bottom explains the highlighted item or
   value. The menu reopens where you left it.
 
