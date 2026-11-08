@@ -923,3 +923,40 @@ def test_phone_page(rig):
     assert json.loads(body)["ok"] and len(rig.photos()) == 1
     rig.app.set_setting("web", False)
     assert rig.app.web is None
+
+
+def test_idle_screens_are_not_redrawn_every_step(rig):
+    rig.long("A")                               # full menu, no live picture
+    n = len(rig.display.frames)
+    for _ in range(10):
+        rig.tick(0.01)                          # 0.1 s with no presses
+    assert len(rig.display.frames) == n
+    rig.tick(0.3)                               # periodic refresh
+    assert len(rig.display.frames) == n + 1
+    rig.press("B")                              # a press redraws at once
+    assert len(rig.display.frames) > n + 1
+    rig.press("X")
+    m = len(rig.display.frames)
+    for _ in range(5):
+        rig.tick(0.01)                          # the live view draws every step
+    assert len(rig.display.frames) == m + 5
+
+
+def test_phone_wifi_setup(rig):
+    rig.app.set_setting("web", True)
+    code, _, body = _http(rig, "/wifi")
+    assert code == 200 and b"camera's hotspot" in body and b"Cafe Guest" not in body
+    assert _http(rig, "/wifi/join?ssid=Neighbour&password=12345678", "POST")[0] == 403
+    rig.app.set_setting("wifi", "hotspot")
+    code, _, body = _http(rig, "/wifi")
+    assert b"Cafe Guest" in body and b"Neighbour" in body and b"Forget" in body
+    _http(rig, "/wifi/join?ssid=Neighbour&password=short", "POST")
+    rig.tick()
+    assert rig.app.network.join_result[0] is False and rig.settings.wifi == "hotspot"
+    _http(rig, "/wifi/join?ssid=Neighbour&password=longenough", "POST")
+    rig.tick()
+    assert rig.app.network.status.ssid == "Neighbour" and rig.settings.wifi == "home"
+    rig.app.set_setting("wifi", "hotspot")
+    _http(rig, "/wifi/forget?name=Neighbour", "POST")
+    assert "Neighbour" not in rig.app.network.saved()
+    rig.app.set_setting("web", False)

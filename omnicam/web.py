@@ -54,12 +54,16 @@ color:var(--fg);text-decoration:none;font:inherit;cursor:pointer}
 .ctl{display:flex;align-items:center;justify-content:center;gap:24px;margin:14px 0}
 table.exif{border-collapse:collapse;margin:6px 0 10px}table.exif td{padding:3px 14px 3px 0}
 table.exif td:first-child{color:var(--dim)}
+.net{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;margin:6px 0;background:var(--panel);
+border-radius:8px}.net b{margin-right:auto}.net input{flex:1 1 160px;padding:9px;border-radius:6px;
+border:1px solid #33363c;background:#0c0d0f;color:var(--fg);font:inherit}
+.tag{font-size:12px;color:var(--dim)}.ok{color:#5fd07a}.err{color:var(--red)}
 """
 
 
 def _page(title: str, body: str, tab: str = "") -> bytes:
     nav = "".join(f'<a href="{href}" class="{"on" if tab == name else ""}">{name}</a>'
-                  for name, href in (("Gallery", "/"), ("Remote", "/remote")))
+                  for name, href in (("Gallery", "/"), ("Remote", "/remote"), ("Wi-Fi", "/wifi")))
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{html.escape(title)}</title><style>{CSS}</style></head>'
@@ -210,7 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             {"/": self.gallery, "/view": self.view, "/thumb": self.thumb, "/file": self.file,
              "/remote": self.remote, "/stream.mjpg": self.stream,
-             "/api/status": self.status}.get(route, self.not_found)()
+             "/api/status": self.status, "/wifi": self.wifi}.get(route, self.not_found)()
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -225,6 +229,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, "message": msg})
             else:
                 self._redirect("/" if ok else "/view?k=" + quote(q.get("k", "")))
+        elif route in ("/wifi/join", "/wifi/forget"):
+            self.wifi_change(route.rsplit("/", 1)[1], q)
         elif route in ("/api/shutter", "/api/ev"):
             ok, msg = self.app.web_command(route.rsplit("/", 1)[1], direction=int(q.get("d", "0") or 0))
             self._json({"ok": ok, "message": msg}, 200 if ok else 409)
@@ -353,6 +359,76 @@ class _Handler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 left -= len(chunk)
+
+    # ---- Wi-Fi setup ----
+    def wifi(self):
+        net = self.app.network
+        st = net.status
+        parts = [f'<main><p>Camera: <b>{html.escape(st.summary)}</b></p>']
+        res = net.join_result
+        if res is not None:
+            cls = "ok" if res[0] else "err"
+            parts.append(f'<p class="{cls}">Last attempt ({html.escape(res[2])}): {html.escape(res[1])}</p>')
+        if not net.setup_allowed(self.client_address[0]):
+            parts.append(
+                '<p>To change the camera\'s Wi-Fi, connect this phone to the <b>camera\'s hotspot</b>: '
+                'on the camera, <i>SETUP › Wi-Fi &amp; Remote › Wi-Fi › Camera hotspot</i>, then scan '
+                'the Wi-Fi code on <i>Connection info</i>. (This page has no login, so Wi-Fi changes '
+                'are only allowed from the hotspot.)</p></main>')
+            return self._send(_page("omnicam Wi-Fi", "".join(parts), "Wi-Fi"))
+        parts.append('<p class="dim">Choose a network. The camera leaves its hotspot to join it, so '
+                     'this page will disconnect. If joining fails, the hotspot comes back within a '
+                     'minute: reconnect and check the message above.</p><h3>Networks in range</h3>')
+        nets = net.scan()
+        if not nets:
+            parts.append('<p class="dim">No networks found. Reload to scan again.</p>')
+        for n in nets:
+            tags = [f"{n.signal}%"] + (["secured"] if n.secure else ["open"]) + (["saved"] if n.saved else [])
+            pw = ('<input type="password" name="password" placeholder="Password" autocomplete="off" '
+                  'minlength="8">' if n.secure and not n.saved else "")
+            parts.append(
+                f'<form class="net" method="post" action="/wifi/join"><b>{html.escape(n.ssid)}</b>'
+                f'<span class="tag">{" · ".join(tags)}</span>'
+                f'<input type="hidden" name="ssid" value="{html.escape(n.ssid)}">{pw}'
+                f'<button class="btn">Join</button></form>')
+        parts.append(
+            '<h3>Hidden network</h3><form class="net" method="post" action="/wifi/join">'
+            '<input name="ssid" placeholder="Network name" required>'
+            '<input type="password" name="password" placeholder="Password (if any)" autocomplete="off">'
+            '<button class="btn">Join</button></form><h3>Saved networks</h3>')
+        saved = net.saved_networks()
+        if not saved:
+            parts.append('<p class="dim">None.</p>')
+        for name, ssid in saved:
+            parts.append(
+                f'<form class="net" method="post" action="/wifi/forget" '
+                f'onsubmit="return confirm(\'Forget {html.escape(ssid)}?\')"><b>{html.escape(ssid)}</b>'
+                f'<input type="hidden" name="name" value="{html.escape(name)}">'
+                f'<button class="btn red">Forget</button></form>')
+        parts.append("</main>")
+        self._send(_page("omnicam Wi-Fi", "".join(parts), "Wi-Fi"))
+
+    def wifi_change(self, action: str, q: dict):
+        net = self.app.network
+        if not net.setup_allowed(self.client_address[0]):
+            return self._send(_page("Not allowed", "<main><p>Wi-Fi can only be changed from the camera's "
+                                    "hotspot.</p></main>", "Wi-Fi"), code=403)
+        if action == "forget":
+            try:
+                net.forget(q.get("name", ""))
+            except (RuntimeError, OSError) as e:
+                log.info("web: forget failed: %s", e)
+            return self._redirect("/wifi")
+        ssid = q.get("ssid", "").strip()
+        if not ssid:
+            return self._redirect("/wifi")
+        net.join(ssid, q.get("password", ""))
+        log.info("web: join %s requested", ssid)
+        body = (f'<main><h3>Joining {html.escape(ssid)}…</h3><p>The camera is leaving its hotspot, so '
+                'this phone will lose the connection to it now.</p><p>If it works, the camera shows '
+                '<b>Wi-Fi: joined</b> and its new address is on <i>Connection info</i>. If not, the '
+                'hotspot comes back within a minute: reconnect and open the Wi-Fi tab to see why.</p></main>')
+        self._send(_page("Joining", body, "Wi-Fi"))
 
     # ---- remote ----
     def remote(self):

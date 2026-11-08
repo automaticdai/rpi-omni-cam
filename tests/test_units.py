@@ -419,3 +419,44 @@ def test_player_reports_a_bad_file(tmp_path):
             break
         time.sleep(0.02)
     assert p.error and not p.playing
+
+
+# ---- display output ------------------------------------------------------------
+def test_rgb565_matches_the_st7789_library():
+    import numpy as np
+    from PIL import Image
+    from omnicam.display import rgb565
+    img = Image.effect_noise((320, 240), 60).convert("RGB")
+    pb = np.rot90(np.array(img), 2).astype("uint16")  # what st7789.image_to_data does
+    ref = (((pb[..., [0]] & 0xF8) << 8) | ((pb[..., [1]] & 0xFC) << 3) | ((pb[..., [2]] & 0xF8) >> 3))
+    assert rgb565(img).tobytes() == ref.byteswap().tobytes()
+
+
+def test_changed_rows():
+    import numpy as np
+    from omnicam.display import changed_rows
+    a = np.zeros((240, 320), dtype=">u2")
+    assert changed_rows(a, None) == (0, 239)
+    assert changed_rows(a, a.copy()) is None
+    b = a.copy()
+    b[30, 5] = 1
+    b[100, 300] = 7
+    assert changed_rows(b, a) == (30, 100)
+
+
+def test_nmcli_terse_split_and_scan_parsing(monkeypatch):
+    from omnicam.network import Network, _split_terse
+    assert _split_terse(r"*:My\:Net:70:WPA2") == ["*", "My:Net", "70", "WPA2"]
+    net = Network()
+    out = {"con": "Home:802-11-wireless\nomnicam-hotspot:802-11-wireless\nWired:802-3-ethernet\n",
+           "dev": "*:Home:80:WPA2\n :Cafe:40:\n :Home:60:WPA2\n :omnicam-ABCD:90:WPA2\n : :20:WPA2\n"}
+    def fake(*a, **k):
+        if a[0] == "-g":  # the network name of a saved connection
+            return "Home\n"
+        return out["con" if "con" in a else "dev"]
+    monkeypatch.setattr(net, "_nmcli", fake)
+    net.hotspot_ssid = "omnicam-ABCD"
+    assert net.saved() == ["Home"] and net.saved_networks() == [("Home", "Home")]
+    nets = net.scan()
+    assert [(n.ssid, n.signal, n.secure, n.saved, n.active) for n in nets] == [
+        ("Home", 80, True, True, True), ("Cafe", 40, False, False, False)]

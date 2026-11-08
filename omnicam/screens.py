@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 class Screen:
     wants_preview = False
+    # Screens without a live picture are redrawn after a button press and
+    # otherwise at most this often (toasts, busy dots, status changes).
+    refresh_s = 0.25
 
     def __init__(self, app: "App"):
         self.app = app
@@ -63,6 +66,8 @@ class LiveView(Screen):
         self._adjust_until = 0.0
         self.countdown_until: Optional[float] = None
         self._last_beep = 0
+        self._layer = None  # (settings key, frame number, screen-size RGBA overlay)
+        self._frame_no = 0
 
     @property
     def params(self) -> tuple[str, ...]:
@@ -147,19 +152,33 @@ class LiveView(Screen):
             self._last_beep = int(remaining)
             self.app.led((1, 0.5, 0), 0.15)
 
+    def _focus_layer(self, raw: Image.Image) -> Image.Image:
+        """Highlight warning + focus peaking as one overlay, made on the
+        un-letterboxed preview and placed like the image. Recomputed every
+        second frame: these are the most expensive parts of the live view."""
+        s = self.app.s
+        self._frame_no += 1
+        key = (s.zebras, s.peaking, raw.size)
+        if self._layer and self._layer[0] == key and self._frame_no - self._layer[1] < 2:
+            return self._layer[2]
+        layer = None
+        if s.zebras:
+            layer = ui.zebras(raw, int(time.monotonic() * 8) % 8)
+        if s.peaking != "off":
+            peak = ui.peaking(raw, s.peaking)
+            layer = peak if layer is None else Image.alpha_composite(layer, peak)
+        placed = ui.place(layer)
+        self._layer = (key, self._frame_no, placed)
+        return placed
+
     def render(self) -> Image.Image:
         app = self.app
         s = app.s
         frame = ui.fit(app.preview_filtered) if app.preview_filtered else Image.new("RGB", (ui.W, ui.H))
         if app.double_ghost is not None:  # double exposure: first shot over the view
             frame = Image.blend(frame, ui.fit(app.double_ghost), 0.45)
-        if app.preview_raw is not None and not app.busy:
-            # computed on the un-letterboxed preview, then placed like the image
-            raw = app.preview_raw
-            if s.zebras:
-                frame = ui.flatten(frame, ui.place(ui.zebras(raw, int(time.monotonic() * 8) % 8)))
-            if s.peaking != "off":
-                frame = ui.flatten(frame, ui.place(ui.peaking(raw, s.peaking)))
+        if app.preview_raw is not None and not app.busy and (s.zebras or s.peaking != "off"):
+            frame = ui.flatten(frame, self._focus_layer(app.preview_raw))
         if app.busy:
             frame = frame.point(lambda v: v // 3)
         layer, d = ui.overlay(frame)
@@ -691,6 +710,10 @@ class PlaybackView(Screen):
                 self.app.open(ConfirmView(self.app, f"Delete {what}?", "Delete",
                                           lambda: self._delete(entry), back=self))
 
+    @property
+    def refresh_s(self) -> float:
+        return 0.0 if self.player is not None and self.player.playing else 0.25
+
     def _render_video(self) -> Image.Image:
         p = self.player
         frame = p.current()
@@ -1077,6 +1100,8 @@ class ConnectionView(Screen):
         lines = [(st.summary, fb, ui.GREEN if st.connected else ui.ACCENT if st.busy else ui.GREY)]
         if st.hotspot:
             lines.append((f"Password: {app.s.hotspot_password}", f, ui.WHITE))
+            if app.s.web:
+                lines.append(("Join another network: phone page › Wi-Fi", f, ui.GREY))
         if st.ip:
             lines.append((f"Address: {st.ip}", f, ui.WHITE))
         if not app.s.web:

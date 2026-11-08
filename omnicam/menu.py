@@ -217,10 +217,10 @@ SCREEN_OFF = Choice("Screen off", "screen_off",
                     help="Turn the screen off after this long without a press")
 
 TABS: list[Tab] = [
-    Tab("CAM", [MODE, DRIVE, SELF_TIMER, EV, METERING, LONG_EXP]),
-    Tab("IMG", [FILTER, WB, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
-    Tab("STYLE", [SHARPNESS, CONTRAST, SATURATION, NOISE]),
+    Tab("SHOT", [MODE, DRIVE, SELF_TIMER, EV, METERING, LONG_EXP]),
+    Tab("IMG", [WB, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
     Tab("FOCUS", [AF_MODE, PEAKING, ZEBRAS, GRID, HISTOGRAM]),
+    Tab("STY", [FILTER, SHARPNESS, CONTRAST, SATURATION, NOISE]),
     Tab("VID", [VIDEO_SIZE, SQ_FPS]),
     Tab("TL", [TL_INTERVAL, TL_COUNT, TL_LOCK, TL_VIDEO, TL_VIDEO_FPS,
                Action("Start timelapse", "timelapse_start", help="Hold X in the live view also starts/stops")]),

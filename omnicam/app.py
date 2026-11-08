@@ -132,6 +132,49 @@ class PostWorker:
         self._q.put(None)
 
 
+class Perf:
+    """Where the time goes in the main loop: logs frames per second, the
+    average time of each stage and the process CPU use every INTERVAL_S."""
+
+    INTERVAL_S = float(os.environ.get("OMNICAM_PERF_S", "30"))
+
+    MIN_REPORT_S = 5.0  # a screen shown for less than this isn't reported
+
+    def __init__(self):
+        self.screen = ""
+        self._reset(time.monotonic())
+
+    def _reset(self, now: float) -> None:
+        self.started, self.frames = now, 0
+        self.totals: dict[str, float] = {}
+        self._cpu = sum(os.times()[:2])
+
+    def add(self, stage: str, seconds: float) -> None:
+        self.totals[stage] = self.totals.get(stage, 0.0) + seconds
+
+    def frame(self, screen: str) -> None:
+        """Count a drawn frame. Reports every INTERVAL_S, and when the screen
+        changes (so each report is about one screen)."""
+        now = time.monotonic()
+        if screen != self.screen:
+            if now - self.started >= self.MIN_REPORT_S:
+                self._report(now)
+            self.screen = screen
+            self._reset(now)
+        self.frames += 1
+        if self.INTERVAL_S > 0 and now - self.started >= self.INTERVAL_S:
+            self._report(now)
+            self._reset(now)
+
+    def _report(self, now: float) -> None:
+        elapsed = max(1e-6, now - self.started)
+        cpu = (sum(os.times()[:2]) - self._cpu) / elapsed * 100
+        n = max(1, self.frames)
+        stages = " ".join(f"{k} {v / n * 1000:.1f}" for k, v in self.totals.items())
+        log.info("perf %s: %.1f fps, cpu %.0f%% | ms/frame: %s", self.screen, self.frames / elapsed,
+                 cpu, stages)
+
+
 @dataclass
 class VideoClip:
     path: Path  # final MP4
@@ -307,6 +350,10 @@ class App:
         self._stream_at = 0.0
         self.keymap: dict[str, str] = {}
         self.update_keymap()
+        self.perf = Perf()
+        self._redraw = True
+        self._rendered_at = -1e9
+        self._join_seen = None
 
     # ---- lifecycle ----------------------------------------------------
     def start(self) -> None:
@@ -361,6 +408,7 @@ class App:
         pressed = {self.keymap.get(b, b) for b in self.display.pressed()}
         self._process_web()
         self._finish_post()
+        self._check_join()
         if not self.powered:
             self._step_standby(pressed, now)
             return
@@ -384,6 +432,7 @@ class App:
             self._last_activity = now
             log.info("button %s %s on %s", ev.button, ev.kind, type(self.screen).__name__)
             self.screen.on_button(ev)
+            self._redraw = True
 
         self._finish_job()
         self._tick_timelapse(now)
@@ -399,16 +448,31 @@ class App:
         if not self.screen_on:
             time.sleep(0.05)
             return
-        if (self.screen.wants_preview or streaming) and not self.busy:
+        perf, clock = self.perf, time.perf_counter
+        live = self.screen.wants_preview or streaming
+        if not (live or self._redraw or now - self._rendered_at >= self.screen.refresh_s):
+            time.sleep(0.02)  # nothing new to draw; keep polling the buttons
+            return
+        self._redraw, self._rendered_at = False, now
+        if live and not self.busy:
             self._grab_preview()
             if streaming and now - self._stream_at >= STREAM_INTERVAL_S:
                 self._stream_at = now
+                t = clock()
                 self._encode_stream()
-        else:
-            time.sleep(0.04)
+                perf.add("stream", clock() - t)
+        elif not live or self.screen.refresh_s:
+            time.sleep(0.02)
+        t = clock()
         frame = self.screen.render()
         frame = self._draw_toast(frame, now)
+        perf.add("render", clock() - t)
+        t = clock()
         self.show(frame)
+        perf.add("display", clock() - t)
+        for k, v in getattr(self.display, "timings", {}).items():
+            perf.add(" " + k, v)
+        perf.frame(type(self.screen).__name__)
 
     def show(self, frame: Image.Image) -> None:
         self.display.show(frame.rotate(180) if self.s.rotate180 else frame)
@@ -495,10 +559,17 @@ class App:
             self.s.save(self.settings_path)
 
     def _grab_preview(self) -> None:
+        perf, clock = self.perf, time.perf_counter
+        t = clock()
         img, meta = self.camera.preview()
+        t2 = clock()
+        perf.add("camera", t2 - t)
         self.preview_raw, self.preview_meta = img, meta
         self.preview_filtered = filters.apply(self.s.filter, img)
+        t3 = clock()
+        perf.add("filter", t3 - t2)
         self.meter_ev = ui.mean_ev(img, self.s.metering) + meta.ev_bias
+        perf.add("meter", clock() - t3)
 
     def _housekeeping(self, now: float) -> None:
         if self._led_until is not None and now >= self._led_until:
@@ -534,14 +605,17 @@ class App:
 
     def open(self, screen: Screen) -> None:
         self.screen = screen
+        self._redraw = True
 
     def back_to_live(self) -> None:
         if isinstance(self.screen, PlaybackView):
             self.screen.stop_video()
         self.screen = self._live
+        self._redraw = True
 
     def toast(self, text: str, colour=ui.WHITE, seconds: float = 1.8) -> None:
         self._toast = (ui.keys(text), colour, self.now() + seconds)
+        self._redraw = True
 
     def _draw_toast(self, frame: Image.Image, now: float) -> Image.Image:
         if not self._toast:
@@ -953,6 +1027,21 @@ class App:
             self.refresh_storage()
             if isinstance(self.screen, PlaybackView):
                 self.screen.reload()
+
+    def _check_join(self) -> None:
+        """Report a Wi-Fi join requested from the phone page."""
+        result = self.network.join_result
+        if result is None or result is self._join_seen:
+            return
+        self._join_seen = result
+        ok, msg, ssid = result
+        if ok:
+            if self.s.wifi in ("hotspot", "off"):  # now on the home network
+                self.s.wifi = "home"
+                self.mark_dirty()
+            self.toast(f"Wi-Fi: joined {ssid}", ui.GREEN, 3)
+        else:
+            self.toast(f"Wi-Fi: {msg}"[:40], ui.RED, 4)
 
     # ---- phone page -------------------------------------------------------
     def _set_web(self, on: bool) -> None:

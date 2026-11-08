@@ -1,6 +1,6 @@
 [Unit]
 Description=omnicam camera UI
-After=local-fs.target
+After=local-fs.target NetworkManager.service
 Wants=local-fs.target
 
 [Service]

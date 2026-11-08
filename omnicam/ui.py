@@ -107,51 +107,71 @@ def meter(d: ImageDraw.ImageDraw, ev: float, y: int) -> None:
     d.polygon([(mx - 4, y + 15), (mx + 4, y + 15), (mx, y + 10)], fill=col)
 
 
+_SRGB_TO_LINEAR = np.array([(v / 255 / 12.92) if v / 255 <= 0.04045 else ((v / 255 + 0.055) / 1.055) ** 2.4
+                            for v in range(256)], dtype=np.float32)
+_yy, _xx = np.mgrid[0:48, 0:64]
+_CENTRE_WEIGHTS = np.exp(-(((_xx - 32) / 24) ** 2 + ((_yy - 24) / 18) ** 2)).astype(np.float32)
+_CENTRE_WEIGHTS /= _CENTRE_WEIGHTS.sum()
+
+
 def mean_ev(img: Image.Image, metering: str = "centre") -> float:
     """Mean linear luminance of an sRGB image as EV from 18 % grey.
 
     metering: centre (centre-weighted), spot (small centre area) or matrix (whole frame).
     """
-    a = np.asarray(img.convert("L").resize((64, 48)), dtype=np.float32) / 255.0
-    lin = np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
+    lin = _SRGB_TO_LINEAR[np.asarray(img.convert("L").resize((64, 48), Image.BILINEAR))]
     if metering == "matrix":
         m = float(lin.mean())
     elif metering == "spot":
         m = float(lin[21:27, 29:35].mean())  # ~10 % of the frame width
     else:
-        yy, xx = np.mgrid[0:48, 0:64]
-        w = np.exp(-(((xx - 32) / 24) ** 2 + ((yy - 24) / 18) ** 2))
-        m = float((lin * w).sum() / w.sum())
+        m = float((lin * _CENTRE_WEIGHTS).sum())
     return float(np.log2(max(m, 1e-4) / 0.18))
 
 
 PEAKING_COLOURS = {"red": (255, 40, 40), "yellow": (255, 230, 0), "blue": (60, 140, 255)}
 
 
+_PEAK_LUTS: dict = {}
+
+
 def peaking(img: Image.Image, colour: str, threshold: int = 48) -> Image.Image:
     """RGBA overlay colouring in-focus (high-contrast) edges."""
-    edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
-    mask = edges.point(lambda v: 255 if v > threshold else 0)
+    lut = _PEAK_LUTS.get(threshold)
+    if lut is None:
+        lut = _PEAK_LUTS[threshold] = [255 if v > threshold else 0 for v in range(256)]
+    mask = img.convert("L").filter(ImageFilter.FIND_EDGES).point(lut)
     # FIND_EDGES leaves the 1-px border unfiltered: blank it so the frame edge isn't "in focus".
-    inner = Image.new("L", img.size, 0)
-    inner.paste(mask.crop((1, 1, img.width - 1, img.height - 1)), (1, 1))
-    mask = inner
+    w, h = img.size
+    ImageDraw.Draw(mask).rectangle([0, 0, w - 1, h - 1], outline=0)
     layer = Image.new("RGBA", img.size, PEAKING_COLOURS.get(colour, PEAKING_COLOURS["red"]) + (255,))
     layer.putalpha(mask)
     return layer
 
 
+_STRIPES: dict = {}
+
+
+def _stripes(size: tuple[int, int], phase: int) -> Image.Image:
+    """Diagonal black/white zebra stripes (RGBA), cached per size and phase."""
+    key = (size, phase)
+    if key not in _STRIPES:
+        w, h = size
+        yy, xx = np.mgrid[0:h, 0:w]
+        stripe = ((xx + yy + phase) // 4) % 2 == 0
+        out = np.empty((h, w, 4), dtype=np.uint8)
+        out[stripe] = (0, 0, 0, 200)
+        out[~stripe] = (255, 255, 255, 120)
+        _STRIPES[key] = Image.fromarray(out, "RGBA")
+    return _STRIPES[key]
+
+
 def zebras(img: Image.Image, phase: int = 0, level: int = 250) -> Image.Image:
     """RGBA overlay of diagonal stripes over blown-out (clipped) areas."""
-    a = np.asarray(img.convert("RGB"))
-    clipped = a.max(axis=2) >= level
-    h, w = clipped.shape
-    yy, xx = np.mgrid[0:h, 0:w]
-    stripe = ((xx + yy + phase) // 4) % 2 == 0
-    out = np.zeros((h, w, 4), dtype=np.uint8)
-    out[clipped & stripe] = (0, 0, 0, 200)
-    out[clipped & ~stripe] = (255, 255, 255, 120)
-    return Image.fromarray(out, "RGBA")
+    a = np.asarray(img.convert("RGB") if img.mode != "RGB" else img)
+    clipped = Image.fromarray(((a.max(axis=2) >= level) * 255).astype(np.uint8), "L")
+    clear = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    return Image.composite(_stripes(img.size, phase), clear, clipped)
 
 
 def place(overlay: Image.Image) -> Image.Image:
