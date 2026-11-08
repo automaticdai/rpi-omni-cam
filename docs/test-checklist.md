@@ -46,5 +46,22 @@ Display HAT Mini). Ticked items have been tried on the camera and confirmed in t
 - [ ] Camera hotspot: join it with the Wi-Fi QR code on Connection info, then open the page
 - [ ] Auto: falls back to the hotspot when the home network is out of range
 
+### Performance (second round)
+- [ ] Live view, 30 s each: normal, highlight warning on, focus peaking on; then an idle
+      menu. Check the `perf` lines in the log (one report per screen): fps, CPU, ms per stage
+- [ ] Highlight warning and peaking still look right (they update every second frame)
+- [ ] Idle menu: CPU well below the 64 % measured before the changes
+
+### Wi-Fi from the phone (needs the hotspot; SSH is cut while testing)
+- [ ] Phone page › Wi-Fi tab from the home network: only explains how to use the hotspot
+- [ ] On the hotspot: networks in range listed (may be short while the hotspot runs; reload)
+- [ ] Join a network with the right password: camera shows "Wi-Fi: joined …", Wi-Fi
+      setting becomes Home network, new address on Connection info
+- [ ] Join with a wrong password: hotspot comes back within a minute, reason shown on the
+      Wi-Fi tab, the failed network is not saved
+- [ ] Hidden network form
+- [ ] Forget a saved network (not the home one, or SSH is lost)
+- [ ] Wi-Fi comes up on its own after a reboot (camera retries until NetworkManager runs)
+
 Most likely to show hardware-only problems: slow motion at 200 fps, night mode memory
 use, and the camera rotation setting (upside down).
