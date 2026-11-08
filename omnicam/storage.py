@@ -4,8 +4,9 @@ Photos live in a FAT32 disk-image file on the SD card (PHOTO_IMAGE), loop-mounte
 at the photo directory (/media/photos, see install.sh). Being a disk image, it can
 be handed to a computer as a USB drive over the micro-USB port (USB export).
 
-Layout:  <root>/DCIM/YYYY-MM-DD/IMG_NNNN.jpg
-         <root>/DCIM/YYYY-MM-DD/TL_NNNN/FRAME_NNNNN.jpg
+Layout:  <root>/DCIM/YYYY-MM-DD/IMG_NNNN.jpg      (+ IMG_NNNN.dng with RAW on)
+         <root>/DCIM/YYYY-MM-DD/VID_NNNN.mp4      (+ VID_NNNN.THM poster JPEG)
+         <root>/DCIM/YYYY-MM-DD/TL_NNNN/FRAME_NNNNN.jpg  (+ TL_NNNN.mp4)
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ def tree_size(path: Path) -> int:
 
 _IMG_RE = re.compile(r"^IMG_(\d+)\.jpg$", re.IGNORECASE)
 _TL_RE = re.compile(r"^TL_(\d+)$")
+_VID_RE = re.compile(r"^VID_(\d+)\.(mp4|h264)$", re.IGNORECASE)
 
 
 @dataclass
@@ -61,6 +63,12 @@ class Entry:
     delete_paths: list    # files/dirs removed when deleting this entry
     title: str
     frames: int = 1
+    video: Optional[Path] = None  # MP4 for videos and timelapses (once made)
+    key: str = ""  # stable id: path relative to DCIM
+
+    @property
+    def is_video(self) -> bool:
+        return self.path.suffix.upper() == ".THM" or self.path.suffix.lower() == ".mp4"
 
 
 class Storage:
@@ -85,6 +93,10 @@ class Storage:
     def next_photo_path(self, when: Optional[datetime] = None) -> Path:
         d = self.day_dir(when)
         return d / f"IMG_{self._next_number(d, _IMG_RE):04d}.jpg"
+
+    def next_video_path(self, when: Optional[datetime] = None) -> Path:
+        d = self.day_dir(when)
+        return d / f"VID_{self._next_number(d, _VID_RE):04d}.mp4"
 
     def new_timelapse_dir(self, when: Optional[datetime] = None) -> Path:
         d = self.day_dir(when)
@@ -118,18 +130,39 @@ class Storage:
         for day in sorted((p for p in self.dcim.iterdir() if p.is_dir()), reverse=True):
             items = []
             for p in day.iterdir():
+                key = f"{day.name}/{p.name}"
                 if p.is_file() and _IMG_RE.match(p.name):
                     extra = [q for q in (p.with_suffix(".dng"),) if q.exists()]
-                    items.append((p.name, Entry(p, [p, *extra], f"{day.name}/{p.name}")))
+                    items.append((p.name, Entry(p, [p, *extra], key, key=key)))
+                elif p.is_file() and p.suffix.lower() == ".mp4" and _VID_RE.match(p.name):
+                    thm = p.with_suffix(".THM")
+                    items.append((p.name, Entry(thm if thm.exists() else p,
+                                                [p, *([thm] if thm.exists() else [])], key,
+                                                video=p, key=key)))
                 elif p.is_dir() and _TL_RE.match(p.name):
                     frames = sorted(p.glob("FRAME_*.jpg"))
                     if frames:
-                        items.append((p.name, Entry(frames[-1], [p], f"{day.name}/{p.name}",
-                                                    frames=len(frames))))
+                        mp4 = p / f"{p.name}.mp4"
+                        items.append((p.name, Entry(frames[-1], [p], key, frames=len(frames),
+                                                    video=mp4 if mp4.exists() else None, key=key)))
             # IMG_ and TL_ sort independently; order within a day by mtime instead.
             items.sort(key=lambda t: t[1].path.stat().st_mtime, reverse=True)
             out.extend(e for _, e in items)
         return out
+
+    def entry(self, key: str) -> Optional[Entry]:
+        return next((e for e in self.entries() if e.key == key), None)
+
+    def resolve(self, rel: str) -> Optional[Path]:
+        """A file under DCIM by relative path, refusing anything outside it."""
+        try:
+            base = self.dcim.resolve()
+            p = (self.dcim / rel).resolve()
+        except (OSError, ValueError):
+            return None
+        if p != base and base in p.parents and p.is_file():
+            return p
+        return None
 
     @staticmethod
     def delete(entry: Entry) -> None:

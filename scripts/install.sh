@@ -19,8 +19,10 @@ echo "==> Installing system packages"
 apt-get update
 apt-get install -y --no-install-recommends \
     python3-picamera2 python3-pil python3-numpy python3-venv python3-pip \
-    python3-spidev python3-libgpiod \
-    fonts-dejavu-core dosfstools
+    python3-spidev python3-libgpiod python3-av \
+    fonts-dejavu-core dosfstools network-manager
+# QR codes on the Wi-Fi screen; optional.
+apt-get install -y --no-install-recommends python3-segno || true
 # I2C access for INA219-based UPS HATs (battery level); optional.
 apt-get install -y --no-install-recommends python3-smbus2 || true
 # RPi.GPIO API (buttons, LED, backlight): rpi-lgpio on current releases.

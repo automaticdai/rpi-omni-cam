@@ -9,8 +9,10 @@ from omnicam import exif
 from omnicam.app import App, SimSystem
 from omnicam.camera import SimCamera
 from omnicam.config import Settings
-from omnicam.screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
-                             MenuView, PlaybackView, QuickMenuView, ReviewView, WelcomeView)
+from omnicam.network import SimNetwork
+from omnicam.screens import (BusyView, ConfirmView, DateTimeView, ExportView, InfoView,
+                             LiveView, MenuView, PlaybackView, QuickMenuView, ReviewView,
+                             WelcomeView)
 
 
 class FakeDisplay:
@@ -55,7 +57,8 @@ class Rig:
         self.settings = Settings(photo_dir=str(tmp_path / "photos"), screen_off=0, **settings)
         self.app = App(SimCamera(), self.display, self.settings,
                        settings_path=tmp_path / "settings.json", require_mount=False,
-                       system=SimSystem(), clock=self.clock, start_on=True)
+                       system=SimSystem(), clock=self.clock, start_on=True,
+                       network=SimNetwork(), web_port=0, web_host="127.0.0.1")
         self.app.start()
         self.app.step()
 
@@ -269,10 +272,9 @@ def test_playback_and_delete(rig):
     rig.press("B")          # function button: playback (default)
     pb = rig.app.screen
     assert isinstance(pb, PlaybackView) and len(pb.entries) == 2
-    rig.press("Y")          # zoom
-    assert pb.zoom
-    rig.press("X")          # back: leaves zoom first
-    assert not pb.zoom and rig.app.screen is pb
+    for mode in ("details", "none", "basic"):  # Y cycles the information shown
+        rig.press("Y")
+        assert pb.INFO_MODES[pb.info_mode] == mode and rig.app.screen is pb
     rig.long("Y")           # hold Y: delete
     assert isinstance(rig.app.screen, ConfirmView)
     rig.press("Y")          # confirm
@@ -298,12 +300,12 @@ def test_system_info_screens(rig):
     rig.press("X")
     assert isinstance(rig.app.screen, MenuView) and rig.app.screen.page.label == "Storage"
     rig.press("X")          # leave the Storage page
-    menu_go(rig, "About", "Camera info")
+    menu_go(rig, "System", "Camera info")
     info = rig.app.screen
     assert isinstance(info, InfoView)
     from omnicam import __version__
     assert info.lines[0] == f"App: omnicam {__version__}"
-    assert any(line.startswith("Shutter: 1/4000 – 1\"") for line in info.lines)
+    assert any(line.startswith("Shutter: 1/4000 – 60\"") for line in info.lines)
     assert any(line.startswith("Temperature:") for line in info.lines)
     assert any(line.startswith("Battery:") for line in info.lines)
 
@@ -509,7 +511,7 @@ def test_manual_focus_is_adjustable_with_y(rig):
 def test_reset_settings(rig):
     rig.app.set_setting("filter", "sepia")
     rig.app.set_setting("mode", "M")
-    menu_go(rig, "About", "Reset settings")
+    menu_go(rig, "System", "Reset settings")
     rig.press("Y")          # confirm
     assert rig.settings.filter == "none" and rig.settings.mode == "P"
     assert isinstance(rig.app.screen, LiveView)
@@ -631,3 +633,293 @@ def test_info_screen_fits_long_text(rig):
     # the last line must be drawn above the hint bar (rows 222+ are the bar)
     last = img.crop((0, 180, 320, 221)).convert("L")    # 10th line, above the hint bar
     assert last.getextrema()[1] > 150
+
+
+# ---- date & time -----------------------------------------------------------
+def test_set_date_and_time(rig):
+    from datetime import datetime
+    menu_go(rig, "System", "Date & time")
+    view = rig.app.screen
+    assert isinstance(view, DateTimeView)
+    view.values = {"year": 2027, "month": 3, "day": 14, "hour": 9, "minute": 58}
+    rig.press("B")          # year +1
+    rig.press("Y")          # -> month
+    rig.press("A")          # month -1
+    rig.press("Y")          # -> day
+    rig.press("Y")          # -> hour
+    rig.press("Y")          # -> minute
+    rig.press("B")
+    rig.press("B")
+    rig.press("B")          # 58 -> 59 -> 00 -> 01 (wraps like a clock)
+    rig.press("Y")          # save
+    assert rig.app.system.time_set_to == datetime(2028, 2, 14, 9, 1)
+    assert isinstance(rig.app.screen, MenuView)
+
+
+def test_date_and_time_cancel_and_day_limits(rig):
+    menu_go(rig, "System", "Date & time")
+    view = rig.app.screen
+    view.values = {"year": 2028, "month": 1, "day": 31, "hour": 0, "minute": 0}
+    rig.press("Y")          # -> month
+    rig.press("B")          # February of a leap year: day becomes 29
+    assert view.values["day"] == 29
+    view.values["year"] = 2027
+    view.field = 1
+    rig.press("A")
+    rig.press("B")          # back to February in a normal year
+    assert view.values["day"] == 28
+    rig.press("X")          # cancel
+    assert not hasattr(rig.app.system, "time_set_to")
+    assert isinstance(rig.app.screen, MenuView)
+
+
+def test_display_settings_moved_to_a_page(rig):
+    menu_go(rig, "Display", "Brightness", "50 %")
+    assert rig.settings.brightness == 50
+
+
+# ---- long exposures ----------------------------------------------------------
+def test_long_exposures_extend_the_shutter(rig):
+    rig.app.set_setting("mode", "S")
+    rig.settings.shutter = 1
+    rig.app.step_exposure("shutter", 1)
+    assert rig.settings.shutter == 1            # 1 s is the limit by default
+    rig.app.set_setting("long_exposure", True)
+    rig.app.step_exposure("shutter", 1)
+    assert rig.settings.shutter == 2
+    rig.app.set_setting("long_exposure", False)
+    assert rig.settings.shutter == 1            # back within the normal range
+
+
+# ---- night and double exposure ----------------------------------------------
+def test_night_mode_saves_one_stacked_photo(rig):
+    rig.app.set_setting("drive", "night4")
+    rig.press("X")
+    rig.finish_job()
+    assert len(rig.photos()) == 1
+
+
+def test_double_exposure(rig):
+    rig.app.set_setting("drive", "double")
+    rig.press("X")
+    rig.finish_job()
+    assert rig.app.double_first is not None and rig.photos() == []
+    rig.app.render_check = rig.app.screen.render()  # ghost drawn without errors
+    rig.press("X")
+    rig.finish_job()
+    assert rig.app.double_first is None and len(rig.photos()) == 1
+    rig.tick(2)
+    rig.press("X")
+    rig.finish_job()
+    assert rig.app.double_first is not None
+    rig.long("X")                               # hold X cancels the pending first shot
+    assert rig.app.double_first is None and rig.app.timelapse is None
+
+
+# ---- video ---------------------------------------------------------------------
+@pytest.fixture
+def fake_remux(monkeypatch):
+    calls = []
+
+    def remux(src, dst, fps):
+        calls.append((src, dst, fps))
+        dst.write_bytes(b"mp4")
+        return 10
+
+    monkeypatch.setattr("omnicam.video.remux_h264", remux)
+    return calls
+
+
+def test_record_video(rig, fake_remux):
+    rig.app.set_setting("mode", "MOVIE")
+    rig.press("X")
+    assert rig.app.camera.recording and rig.app.clip is not None
+    assert rig.app.camera.recording.size == (1920, 1080)
+    rig.tick(1.5)
+    rig.press("A")                              # menus are blocked while recording
+    assert isinstance(rig.app.screen, LiveView)
+    rig.press("X")
+    assert not rig.app.camera.recording
+    rig.app.post.wait(5)
+    rig.tick()
+    (src, dst, fps), = fake_remux
+    assert dst.name == "VID_0001.mp4" and fps == 30 and not src.exists()
+    entries = rig.app.storage.entries()
+    assert len(entries) == 1 and entries[0].is_video and entries[0].video == dst
+    assert entries[0].path.suffix == ".THM"     # poster frame
+
+
+def test_slow_motion(rig, fake_remux):
+    rig.app.set_setting("mode", "SQ")
+    rig.app.set_setting("sq_fps", 120)
+    rig.press("X")
+    assert rig.app.camera.recording.size == (640, 480) and rig.app.camera.recording.fps == 120
+    rig.press("X")
+    rig.app.post.wait(5)
+    rig.tick()
+    assert fake_remux[0][2] == 30               # 120 fps played at 30: four times slower
+
+
+def test_playback_shows_videos(rig, fake_remux):
+    rig.app.set_setting("mode", "MOVIE")
+    rig.press("X")
+    rig.press("X")
+    rig.app.post.wait(5)
+    rig.tick()
+    rig.app.open(PlaybackView(rig.app))
+    pb = rig.app.screen
+    for _ in range(3):
+        assert pb.render().size == (320, 240)
+        rig.press("Y")
+
+
+def test_play_a_video_in_playback(rig, monkeypatch):
+    import time
+    from test_units import _make_mp4
+    monkeypatch.setattr("omnicam.video.remux_h264", lambda src, dst, fps: _make_mp4(dst, 3) and 90)
+    rig.app.set_setting("mode", "MOVIE")
+    rig.press("X")
+    rig.press("X")
+    assert rig.app.post.wait(30)
+    rig.tick()
+    rig.app.open(PlaybackView(rig.app))
+    pb = rig.app.screen
+    rig.press("Y")                              # play
+    assert pb.player is not None
+    end = time.monotonic() + 10
+    while pb.player.frame is None and time.monotonic() < end:
+        rig.tick(0.05)
+    assert pb.player.playing and pb.render().size == (320, 240)
+    rig.press("B")                              # skip forward 5 s: clamps near the end
+    rig.press("Y")                              # pause
+    end = time.monotonic() + 5
+    while pb.player.playing and time.monotonic() < end:
+        rig.tick(0.05)
+    assert not pb.player.playing
+    rig.press("X")                              # stop the video, stay in playback
+    assert pb.player is None and rig.app.screen is pb
+    rig.press("Y")
+    rig.press("X")
+    rig.press("X")                              # back to the live view
+    assert isinstance(rig.app.screen, LiveView) and pb.player is None
+
+
+def test_timelapse_makes_a_video(rig):
+    pytest.importorskip("av")
+    rig.app.set_setting("tl_interval", 1)
+    rig.long("X")
+    for _ in range(3):
+        rig.finish_job()
+        rig.tick(1.1)
+    rig.finish_job()
+    rig.long("X")
+    assert rig.app.timelapse is None
+    assert rig.app.post.wait(60)
+    rig.tick()
+    tl = rig.app.storage.entries()[0]
+    assert tl.frames >= 2 and tl.video is not None and tl.video.stat().st_size > 0
+
+
+# ---- custom sets -------------------------------------------------------------
+def test_custom_sets(rig):
+    menu_go(rig, "Custom sets", "Recall Custom 1")
+    assert rig.settings.mode == "P"             # empty: nothing changes
+    rig.app.set_setting("mode", "M")
+    rig.app.set_setting("filter", "bw")
+    rig.app.set_setting("brightness", 50)
+    menu_go(rig, "Save to Custom 1")
+    rig.app.set_setting("mode", "P")
+    rig.app.set_setting("filter", "none")
+    rig.app.set_setting("brightness", 75)
+    menu_go(rig, "Recall Custom 1")
+    assert (rig.settings.mode, rig.settings.filter) == ("M", "bw")
+    assert rig.settings.brightness == 75        # setup settings aren't part of a set
+
+
+# ---- button layout -----------------------------------------------------------
+def test_left_handed_mirrors_the_buttons(rig):
+    from omnicam import ui
+    rig.app.set_setting("left_handed", True)
+    rig.press("A")                              # physical A is now the shutter
+    assert rig.app.busy
+    rig.finish_job()
+    assert len(rig.photos()) == 1
+    assert ui.keys("Y keep · X cancel") == "B keep · A cancel"
+    assert ui.keys("B&W") == "B&W"
+    rig.app.set_setting("left_handed", False)
+    assert ui.keys("Y keep") == "Y keep"
+
+
+def test_upside_down_rotates_screen_and_buttons(rig):
+    rig.app.back_to_live()
+    rig.app.set_setting("rotate180", True)
+    assert rig.app.camera.rotated
+    rig.press("B")                              # physical B (now top right) = shutter X
+    assert rig.app.busy
+    rig.finish_job()
+    rig.app.set_setting("rotate180", False)
+
+
+# ---- Wi-Fi and the phone page ------------------------------------------------
+def test_connection_screen(rig):
+    rig.app.set_setting("web", True)
+    rig.app.set_setting("wifi", "hotspot")
+    menu_go(rig, "Wi-Fi & Remote", "Connection info")
+    view = rig.app.screen
+    assert len(view._codes()) == 2              # join the hotspot, then open the page
+    assert view.render().size == (320, 240)
+    rig.press("B")
+    assert view.page == 1
+    rig.app.set_setting("web", False)
+
+
+def _http(rig, path, method="GET", headers=None):
+    import threading
+    import urllib.request
+    url = f"http://127.0.0.1:{rig.app.web.port}{path}"
+    req = urllib.request.Request(url, method=method, headers=headers or {},
+                                 data=b"" if method == "POST" else None)
+    out = {}
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                out["r"] = (r.status, r.headers, r.read())
+        except urllib.error.HTTPError as e:
+            out["r"] = (e.code, e.headers, e.read())
+
+    t = threading.Thread(target=fetch)
+    t.start()
+    while t.is_alive():                         # commands need the main loop running
+        rig.tick(0.02)
+        t.join(0.01)
+    return out["r"]
+
+
+def test_phone_page(rig):
+    import json
+    rig.press("X")
+    rig.finish_job()
+    rig.tick(2)
+    rig.app.set_setting("web", True)
+    code, _, body = _http(rig, "/")
+    assert code == 200 and b"IMG_0001" in body
+    key = rig.app.storage.entries()[0].key
+    code, h, body = _http(rig, f"/thumb?k={key}")
+    assert code == 200 and h["Content-Type"] == "image/jpeg"
+    code, _, body = _http(rig, f"/view?k={key}")
+    assert code == 200 and b"Delete" in body
+    assert b"Shutter" in body and b"ISO" in body and b"Camera</td><td>simulated" in body
+    code, h, body = _http(rig, f"/file?p={key}", headers={"Range": "bytes=0-9"})
+    assert code == 206 and len(body) == 10 and body[:2] == b"\xff\xd8"
+    assert _http(rig, "/file?p=../../settings.json")[0] == 404
+    status = json.loads(_http(rig, "/api/status")[2])
+    assert status["powered"] and "shots left" in status["summary"]
+    code, _, body = _http(rig, "/api/shutter", "POST")
+    assert code == 200 and json.loads(body)["ok"]
+    rig.finish_job()
+    assert len(rig.photos()) == 2
+    code, _, body = _http(rig, f"/delete?k={key}&json=1", "POST")
+    assert json.loads(body)["ok"] and len(rig.photos()) == 1
+    rig.app.set_setting("web", False)
+    assert rig.app.web is None

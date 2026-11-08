@@ -49,6 +49,10 @@ def read(img: Image.Image) -> dict:
             out["exposure_s"] = float(ifd[_EXPOSURE])
         if _ISO in ifd:
             out["iso"] = int(ifd[_ISO])
+        if _EV_BIAS in ifd:
+            out["ev"] = float(ifd[_EV_BIAS])
+        if exif.get(_MODEL):
+            out["model"] = str(exif[_MODEL]).strip()
         stamp: Optional[str] = ifd.get(_ORIGINAL) or exif.get(_DATETIME)
         if stamp:
             out["datetime"] = datetime.strptime(stamp, "%Y:%m:%d %H:%M:%S")

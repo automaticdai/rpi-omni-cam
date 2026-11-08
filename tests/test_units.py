@@ -268,4 +268,154 @@ def test_edit_arrows_know_the_ends():
     from omnicam.screens import _at_ends
     assert _at_ends(MODE, "P") == (True, False)
     assert _at_ends(MODE, "A") == (False, False)
-    assert _at_ends(MODE, "M") == (False, True)
+    assert _at_ends(MODE, "SQ") == (False, True)
+
+
+# ---- night stacking ----------------------------------------------------------
+def test_stacker_aligns_shifted_frames():
+    import numpy as np
+    from PIL import Image
+    from omnicam.stack import Stacker
+    base = np.asarray(Image.effect_noise((480, 360), 60).convert("RGB"))
+    st = Stacker()
+    for dx in (0, 2, -1):
+        st.add(Image.fromarray(np.roll(base, dx * 8, axis=1)))
+    assert st.count == 3 and st.margin == [0, 16]
+    out = np.asarray(st.result()).astype(int)
+    # aligned: the average matches the original (cropped by the margin)
+    assert np.abs(out - base[:, 16:-16].astype(int)).mean() < 2
+
+
+# ---- video files -------------------------------------------------------------
+def test_video_size_fits_1080p():
+    from omnicam.video import video_size
+    assert video_size((3280, 2464)) == (1436, 1080)
+    assert video_size((2464, 3280)) == (1080, 1436)
+    assert video_size((640, 480)) == (640, 480)
+
+
+def test_remux_and_timelapse_video(tmp_path):
+    av = pytest.importorskip("av")
+    from PIL import Image
+    from omnicam import video
+    raw = tmp_path / "clip.h264"
+    with av.open(str(raw), "w", format="h264") as out:
+        s = out.add_stream("libx264", rate=120)
+        s.width, s.height, s.pix_fmt = 320, 240, "yuv420p"
+        for i in range(60):
+            for pkt in s.encode(av.VideoFrame.from_image(Image.new("RGB", (320, 240), (i * 4, 0, 0)))):
+                out.mux(pkt)
+        for pkt in s.encode():
+            out.mux(pkt)
+    mp4 = tmp_path / "clip.mp4"
+    assert video.remux_h264(raw, mp4, 30) == 60
+    assert abs(video.duration_s(mp4) - 2.0) < 0.1   # 60 frames at 30 fps: slow motion
+    frames = []
+    for i in range(6):
+        p = tmp_path / f"FRAME_{i:05d}.jpg"
+        Image.new("RGB", (800, 600), (0, i * 40, 0)).save(p)
+        frames.append(p)
+    progress = []
+    tl = tmp_path / "tl.mp4"
+    video.frames_to_mp4(frames, tl, 12, progress.append)
+    assert tl.exists() and progress[-1] == 1.0
+    assert abs(video.duration_s(tl) - 0.5) < 0.1
+
+
+# ---- storage -----------------------------------------------------------------
+def test_storage_lists_videos_and_refuses_paths_outside(tmp_path):
+    from omnicam.storage import Storage
+    st = Storage(str(tmp_path), require_mount=False)
+    p = st.next_video_path()
+    p.write_bytes(b"x")
+    p.with_suffix(".THM").write_bytes(b"x")
+    assert st.next_video_path().name == "VID_0002.mp4"
+    (e,) = st.entries()
+    assert e.is_video and e.video == p and st.entry(e.key) is not None
+    assert st.resolve(e.key) == p.resolve()
+    assert st.resolve("../../etc/passwd") is None
+    (tmp_path / "secret.txt").write_text("x")
+    assert st.resolve("../secret.txt") is None
+    st.delete(e)
+    assert not p.exists() and not p.with_suffix(".THM").exists()
+
+
+def test_settings_accept_video_modes(tmp_path):
+    import json
+    from omnicam.config import Settings
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"mode": "SQ", "shutter": 8, "long_exposure": True}))
+    s = Settings.load(f)
+    assert s.mode == "SQ" and s.video_mode and s.shutter == 8 and s.exp_shutter is None
+    f.write_text(json.dumps({"shutter": 8}))
+    assert Settings.load(f).shutter == 1        # long exposures off: capped at 1 s
+
+
+def test_long_shutter_steps():
+    from omnicam.exposure import shutter_steps
+    assert shutter_steps(11.77)[-1] == 1
+    assert shutter_steps(11.77, long=True)[-3:] == [2, 4, 8]
+
+
+def _make_mp4(path, seconds=3, fps=30, size=(640, 360)):
+    av = pytest.importorskip("av")
+    from PIL import Image
+    with av.open(str(path), "w", format="mp4") as out:
+        s = out.add_stream("libx264", rate=fps)
+        s.width, s.height, s.pix_fmt = size[0], size[1], "yuv420p"
+        for i in range(seconds * fps):
+            img = Image.new("RGB", size, (i * 255 // (seconds * fps), 40, 200))
+            for pkt in s.encode(av.VideoFrame.from_image(img)):
+                out.mux(pkt)
+        for pkt in s.encode():
+            out.mux(pkt)
+    return path
+
+
+def test_player_plays_seeks_and_ends(tmp_path):
+    import time
+    from omnicam.video import Player
+    mp4 = _make_mp4(tmp_path / "v.mp4")
+    p = Player(mp4, (320, 240))
+
+    def wait(cond, timeout=10):
+        end = time.monotonic() + timeout
+        while not cond() and time.monotonic() < end:
+            p.current()  # the screen keeps looking
+            time.sleep(0.02)
+        return cond()
+
+    assert wait(lambda: p.frame is not None)
+    assert p.frame.size == (320, 180) and abs(p.duration - 3) < 0.2
+    p.toggle()                                   # pause
+    assert wait(lambda: not p.playing)
+    paused_at = p.position
+    p.seek(1.0)
+    assert wait(lambda: abs(p.position - (paused_at + 1.0)) < 0.05)
+    p.toggle()                                   # resume to the end
+    assert wait(lambda: p.ended, 8) and not p.playing
+    p.toggle()                                   # replay from the start
+    assert wait(lambda: p.playing and p.position < 1.0)
+    p.close()
+
+
+def test_player_pauses_when_not_watched(tmp_path):
+    import time
+    from omnicam.video import Player
+    p = Player(_make_mp4(tmp_path / "v.mp4"), (320, 240))
+    time.sleep(1.6)                              # nobody calls current()
+    assert not p.playing and not p.ended
+    p.close()
+
+
+def test_player_reports_a_bad_file(tmp_path):
+    import time
+    from omnicam.video import Player
+    bad = tmp_path / "bad.mp4"
+    bad.write_bytes(b"not a video")
+    p = Player(bad)
+    for _ in range(100):
+        if p.error:
+            break
+        time.sleep(0.02)
+    assert p.error and not p.playing

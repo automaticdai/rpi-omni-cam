@@ -30,9 +30,11 @@ def main(argv=None) -> int:
         from .camera import SimCamera
         from .display import SimDisplay
 
+        from .network import SimNetwork
+
         display, camera = SimDisplay(), SimCamera()
         app = App(camera, display, settings, settings_path=args.config,
-                  require_mount=False, system=SimSystem())
+                  require_mount=False, system=SimSystem(), network=SimNetwork(), web_port=8080)
     else:
         from .display import HatDisplay
 

@@ -91,31 +91,42 @@ FN_ACTIONS = [
     ("peaking", "Focus peaking (cycle)"), ("zebras", "Highlight warning on/off"),
     ("grid", "Grid (cycle)"), ("histogram", "Histogram on/off"),
     ("self_timer", "Self-timer (cycle)"), ("timelapse", "Timelapse start/stop"),
-    ("usb_export", "USB export"),
+    ("usb_export", "USB export"), ("custom1", "Recall Custom 1"), ("custom2", "Recall Custom 2"),
+    ("web", "Phone access on/off"), ("wifi_info", "Wi-Fi & Remote info"),
 ]
 
 # ---- settings ----------------------------------------------------------------
 MODE = Choice("Mode", "mode", [
     ("P", "P · Program"), ("A", "A · Aperture priority"),
-    ("S", "S · Shutter priority"), ("M", "M · Manual")],
+    ("S", "S · Shutter priority"), ("M", "M · Manual"),
+    ("MOVIE", "Movie · Video"), ("SQ", "S&Q · Slow motion")],
     help="Which exposure values you set yourself",
     value_help={"P": "Camera sets shutter and ISO; Y adjusts EV",
                 "A": "You set ISO (aperture on the lens); camera sets shutter",
                 "S": "You set the shutter; camera sets ISO",
-                "M": "You set shutter and ISO"})
+                "M": "You set shutter and ISO",
+                "MOVIE": "Video: X starts and stops recording (VIDEO tab: size)",
+                "SQ": "Slow-motion video at 640×480 (VIDEO tab: speed)"})
 DRIVE = Choice("Drive", "drive", [
     ("single", "Single"), ("burst5", "Burst ×5"), ("burst10", "Burst ×10"),
     ("bracket3_1", "Bracket 3 · ±1 EV"), ("bracket3_2", "Bracket 3 · ±2 EV"),
-    ("bracket5_1", "Bracket 5 · ±1,2 EV")],
+    ("bracket5_1", "Bracket 5 · ±1,2 EV"), ("night4", "Night · 4 frames"),
+    ("night8", "Night · 8 frames"), ("double", "Double exposure")],
     help="What one press of X shoots",
     short={"single": "Single", "burst5": "Burst 5", "burst10": "Burst 10",
-           "bracket3_1": "BKT3 ±1", "bracket3_2": "BKT3 ±2", "bracket5_1": "BKT5"},
+           "bracket3_1": "BKT3 ±1", "bracket3_2": "BKT3 ±2", "bracket5_1": "BKT5",
+           "night4": "Night 4", "night8": "Night 8", "double": "Double"},
     value_help={"single": "One photo per press",
                 "burst5": "5 fast frames at reduced size",
                 "burst10": "10 fast frames at reduced size",
                 "bracket3_1": "3 frames at −1, 0, +1 EV",
                 "bracket3_2": "3 frames at −2, 0, +2 EV",
-                "bracket5_1": "5 frames at −2, −1, 0, +1, +2 EV"})
+                "bracket5_1": "5 frames at −2, −1, 0, +1, +2 EV",
+                "night4": "Averages 4 frames into one photo: less noise in the dark",
+                "night8": "Averages 8 frames: even less noise; hold steady",
+                "double": "Two shots blended into one; the first shows over the view"})
+LONG_EXP = Choice("Long exposures", "long_exposure", _ON_OFF,
+                  help="Offer shutter speeds past 1 s (S and M modes; use a tripod)")
 SELF_TIMER = Choice("Self-timer", "self_timer", [(0, "Off"), (2, "2 s"), (10, "10 s")],
                     help="Delay between pressing X and the shot")
 EV = Choice("Exposure comp.", "ev", [(v, format_ev(v)) for v in EV_STEPS],
@@ -165,6 +176,28 @@ ZEBRAS = Choice("Highlight warning", "zebras", _ON_OFF,
 GRID = Choice("Grid", "grid", [("off", "Off"), ("thirds", "Thirds"), ("diagonal", "Thirds + diagonals")],
               help="Composition lines over the live view")
 HISTOGRAM = Choice("Histogram", "histogram", _ON_OFF, help="Brightness graph in the live view")
+VIDEO_SIZE = Choice("Video size", "video_size", [("1080p", "1080p · 30 fps"), ("720p", "720p · 30 fps")],
+                    help="Movie mode recording size (MP4, H.264)")
+SQ_FPS = Choice("Slow-motion speed", "sq_fps",
+                [(60, "60 fps · 2× slower"), (120, "120 fps · 4× slower"), (200, "200 fps · 6.7× slower")],
+                help="S&Q mode: frames per second captured; plays back at 30 fps")
+TL_VIDEO = Choice("Make video", "tl_video", _ON_OFF,
+                  help="Turn the frames into an MP4 when the timelapse ends")
+TL_VIDEO_FPS = Choice("Video speed", "tl_video_fps", [(12, "12 fps"), (24, "24 fps"), (30, "30 fps")],
+                      help="Frames per second of the timelapse video")
+WIFI = Choice("Wi-Fi", "wifi", [("off", "Off"), ("home", "Home network"), ("hotspot", "Camera hotspot"),
+                                ("auto", "Auto")],
+              help="How the camera connects for the phone page",
+              value_help={"off": "Wi-Fi radio off (saves battery)",
+                          "home": "Join the saved home network",
+                          "hotspot": "The camera makes its own network for your phone",
+                          "auto": "Home network; hotspot if none is found within a minute"})
+WEB = Choice("Phone access", "web", _ON_OFF,
+             help="Gallery and remote control in a phone browser over Wi-Fi")
+LEFT_HANDED = Choice("Left-handed", "left_handed", _ON_OFF,
+                     help="Mirror the buttons: shutter and Y on the left side")
+ROTATE = Choice("Upside down", "rotate180", _ON_OFF,
+                help="Camera mounted upside down: rotates screen, photos and buttons")
 TL_INTERVAL = Choice("Interval", "tl_interval",
                      [(v, _seconds(v)) for v in (1, 2, 5, 10, 30, 60, 300, 600, 1800, 3600)],
                      help="Time between timelapse frames")
@@ -184,27 +217,48 @@ SCREEN_OFF = Choice("Screen off", "screen_off",
                     help="Turn the screen off after this long without a press")
 
 TABS: list[Tab] = [
-    Tab("SHOOT", [MODE, DRIVE, SELF_TIMER, EV, METERING, WB]),
-    Tab("IMAGE", [FILTER, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
+    Tab("SHOOT", [MODE, DRIVE, SELF_TIMER, EV, METERING, LONG_EXP]),
+    Tab("IMAGE", [FILTER, WB, IMAGE_SIZE, ASPECT, JPEG_QUALITY, SAVE_RAW]),
     Tab("STYLE", [SHARPNESS, CONTRAST, SATURATION, NOISE]),
     Tab("FOCUS", [AF_MODE, PEAKING, ZEBRAS, GRID, HISTOGRAM]),
-    Tab("TL", [TL_INTERVAL, TL_COUNT, TL_LOCK,
+    Tab("VIDEO", [VIDEO_SIZE, SQ_FPS]),
+    Tab("TL", [TL_INTERVAL, TL_COUNT, TL_LOCK, TL_VIDEO, TL_VIDEO_FPS,
                Action("Start timelapse", "timelapse_start", help="Hold X in the live view also starts/stops")]),
     Tab("SETUP", [
-        FN_BUTTON, FN_BUTTON_LONG, BRIGHTNESS, SCREEN_OFF,
+        Section("Wi-Fi & Remote", [
+            WIFI, WEB,
+            Action("Connection info", "wifi_info", help="Network, address and QR codes for your phone"),
+        ], help="Wi-Fi, hotspot, phone gallery and remote"),
+        Section("Custom sets", [
+            Action("Recall Custom 1", "recall1", help="Load the settings saved in Custom 1"),
+            Action("Recall Custom 2", "recall2", help="Load the settings saved in Custom 2"),
+            Action("Save to Custom 1", "save1", help="Save the current shooting settings as Custom 1"),
+            Action("Save to Custom 2", "save2", help="Save the current shooting settings as Custom 2"),
+        ], help="Save and recall two sets of shooting settings"),
+        Section("Controls", [FN_BUTTON, FN_BUTTON_LONG, LEFT_HANDED, ROTATE],
+                help="B button functions, left-handed, upside down"),
+        Section("Display", [BRIGHTNESS, SCREEN_OFF], help="Screen brightness, screen-off timer"),
         Section("Storage", [
-            Action("Playback", "playback", help="Browse, zoom and delete photos"),
+            Action("Playback", "playback", help="Browse, inspect and delete photos and videos"),
             Action("USB export", "usb_export", help="Show the photos as a USB drive on a computer"),
             Action("Storage info", "storage_info", help="Space used and photos stored"),
-            Action("Erase all photos", "erase", help="Delete every photo (asks first)"),
+            Action("Erase all photos", "erase", help="Delete every photo and video (asks first)"),
         ], help="Playback, USB export, space, erase"),
-        Section("About", [
+        Section("System", [
+            Action("Date & time", "datetime",
+                   help="Set the clock; the Pi has no clock battery, so set it when offline"),
             Action("Camera info", "camera_info", help="Version, board, sensor, temperature, battery"),
             Action("Reset settings", "reset", help="Restore all settings to their defaults"),
             Action("Shut down", "shutdown", help="Power off the Pi (unplug afterwards)"),
-        ], help="Camera info, reset settings, shut down"),
+        ], help="Date & time, camera info, reset, shut down"),
     ]),
 ]
+
+# Settings a custom set saves: shooting settings, not setup.
+CUSTOM_KEYS = ("mode", "shutter", "iso", "ev", "wb", "metering", "drive", "long_exposure",
+               "af_mode", "lens_position", "filter", "sharpness", "contrast", "saturation",
+               "noise_reduction", "image_size", "aspect", "jpeg_quality", "save_raw",
+               "self_timer", "grid", "histogram", "peaking", "zebras", "video_size", "sq_fps")
 
 # Quick menu (A in live view): eight tiles, changed in place.
 QUICK: list[Choice] = [MODE, DRIVE, EV, WB, METERING, AF_MODE, FILTER, ASPECT]

@@ -61,6 +61,29 @@ def preview_size(sensor: tuple[int, int]) -> tuple[int, int]:
     return w - w % 2, h - h % 2
 
 
+def yuv420_to_rgb(array, size: tuple[int, int]) -> Image.Image:
+    """Picamera2 YUV420 array (h*3/2 rows, with stride padding) -> RGB image."""
+    w, h = size
+    y = array[:h, :w]
+    planes = array.reshape((array.shape[0] * 2, array.strides[0] // 2))
+    u = planes[2 * h: 2 * h + h // 2, : w // 2]
+    v = planes[2 * h + h // 2:, : w // 2]
+    half = (w // 2, h // 2)
+    Y = Image.fromarray(y.copy(), "L")
+    U = Image.fromarray(u.copy(), "L").resize((w, h)) if u.shape[::-1] == half else Image.new("L", (w, h), 128)
+    V = Image.fromarray(v.copy(), "L").resize((w, h)) if v.shape[::-1] == half else Image.new("L", (w, h), 128)
+    return Image.merge("YCbCr", (Y, U, V)).convert("RGB")
+
+
+@dataclass
+class Recording:
+    """A video being recorded: raw H.264 now, remuxed to MP4 afterwards."""
+    raw_path: Path
+    size: tuple[int, int]
+    fps: float  # capture rate
+    started: float = 0.0
+
+
 def preview_exposure(settings: Settings, max_gain: float) -> tuple[Optional[float], Optional[float], float]:
     """(shutter_s, gain, ev_bias) to use for the live preview.
 
@@ -123,18 +146,46 @@ class PiCamera:
         self._zoom = 1
         self._new_style = "ExposureTimeMode" in ctrls  # libcamera >= 0.5
         self._lock: Optional[FrameMeta] = None
+        self._rotate = False
+        self._preview_cfg = self._make_preview_cfg()
+        self._ev_bias = 0.0
+        self.recording: Optional[Recording] = None
+        self._encoder = None
+        self._settings = Settings()
+
+    def _transform(self):
+        from libcamera import Transform
+
+        return Transform(hflip=1, vflip=1) if self._rotate else Transform()
+
+    def _make_preview_cfg(self):
         # Ask for a 2x2-binned full-sensor mode: left alone, libcamera picks
         # the mode closest to 320x240, which on some sensors (e.g. IMX219's
         # 640x480) is a centre crop, so the preview would not match the photo.
+        sensor = self.info.resolution
         binned = (sensor[0] // 2, sensor[1] // 2)
         main = {"size": self.preview_size, "format": "RGB888"}
         try:
-            self._preview_cfg = self.cam.create_preview_configuration(
-                main=main, sensor={"output_size": binned}, buffer_count=3)
+            return self.cam.create_preview_configuration(
+                main=main, sensor={"output_size": binned}, buffer_count=3,
+                transform=self._transform())
         except TypeError:  # older picamera2 without the sensor= argument
-            self._preview_cfg = self.cam.create_preview_configuration(
-                main=main, raw={"size": binned}, buffer_count=3)
-        self._ev_bias = 0.0
+            return self.cam.create_preview_configuration(
+                main=main, raw={"size": binned}, buffer_count=3, transform=self._transform())
+
+    def set_rotation(self, upside_down: bool) -> None:
+        """Rotate the image 180° (camera mounted upside down); restarts the preview."""
+        if upside_down == self._rotate:
+            return
+        self._rotate = upside_down
+        running = self.cam.started
+        if running:
+            self.cam.stop()
+        self._preview_cfg = self._make_preview_cfg()
+        if running:
+            self.cam.configure(self._preview_cfg)
+            self.cam.start()
+            self.apply(self._settings)
 
     def start(self) -> None:
         self.cam.configure(self._preview_cfg)
@@ -149,10 +200,14 @@ class PiCamera:
         log.info("preview full-view crop: %s", self._crop_max)
 
     def stop(self) -> None:
+        if self.recording:
+            self.stop_recording()
         self.cam.stop()
 
     def close(self) -> None:
         try:
+            if self.recording:
+                self.stop_recording()
             self.cam.stop()
         finally:
             self.cam.close()
@@ -210,6 +265,12 @@ class PiCamera:
 
     def apply(self, settings: Settings) -> None:
         self._settings = settings
+        if self.recording:  # auto exposure at the fixed video frame rate
+            c = self._controls(None, None, settings)
+            frame_us = int(1e6 / self.recording.fps)
+            c["FrameDurationLimits"] = (frame_us, frame_us)
+            self.cam.set_controls(c)
+            return
         shutter, gain, self._ev_bias = preview_exposure(settings, self.info.max_gain)
         c = self._controls(shutter, gain, settings)
         if not shutter:
@@ -246,12 +307,71 @@ class PiCamera:
     def preview(self) -> tuple[Image.Image, FrameMeta]:
         req = self.cam.capture_request()
         try:
-            img = req.make_image("main").convert("RGB")
+            if self.recording:
+                lores = self.cam.camera_config["lores"]["size"]
+                img = yuv420_to_rgb(req.make_array("lores"), lores)
+            else:
+                img = req.make_image("main").convert("RGB")
             meta = self._meta(req.get_metadata())
         finally:
             req.release()
-        meta.ev_bias = self._ev_bias
+        meta.ev_bias = 0.0 if self.recording else self._ev_bias
         return img, meta
+
+    # ---- video ----------------------------------------------------------
+    def start_recording(self, raw_path: Path, size: tuple[int, int], fps: int,
+                        settings: Settings) -> Recording:
+        """Record H.264 (hardware encoder) to raw_path; the screen shows the
+        low-resolution stream. Returns the recording with the real frame rate."""
+        from picamera2.encoders import H264Encoder
+        from picamera2.outputs import FileOutput
+
+        lores = preview_size(size)
+        frame_us = int(1e6 / fps)
+        cfg = self.cam.create_video_configuration(
+            main={"size": size, "format": "YUV420"},
+            lores={"size": lores, "format": "YUV420"},
+            buffer_count=6, transform=self._transform(),
+            controls={"FrameDurationLimits": (frame_us, frame_us)})
+        self.cam.stop()
+        self.cam.configure(cfg)
+        self.recording = Recording(Path(raw_path), size, float(fps), time.monotonic())
+        c = self._controls(None, None, settings)
+        c["FrameDurationLimits"] = (frame_us, frame_us)
+        self.cam.set_controls(c)
+        pixels_per_s = size[0] * size[1] * fps
+        bitrate = int(min(17e6, max(4e6, pixels_per_s * 0.16)))
+        self._encoder = H264Encoder(bitrate=bitrate, repeat=True, iperiod=fps)
+        try:
+            self.cam.start_recording(self._encoder, FileOutput(str(raw_path)))
+        except Exception:
+            self.recording = None
+            self.cam.configure(self._preview_cfg)
+            self.cam.start()
+            self.apply(settings)
+            raise
+        try:  # the sensor may not reach the requested rate (e.g. slow motion)
+            dur = self.cam.capture_metadata().get("FrameDuration")
+            if dur:
+                self.recording.fps = round(1e6 / dur, 1)
+        except Exception:
+            pass
+        log.info("recording %s at %sx%s, %.1f fps, %.1f Mb/s", raw_path, *size,
+                 self.recording.fps, bitrate / 1e6)
+        return self.recording
+
+    def stop_recording(self) -> Optional[Recording]:
+        rec, self.recording = self.recording, None
+        if rec is None:
+            return None
+        try:
+            self.cam.stop_recording()
+        finally:
+            self._encoder = None
+            self.cam.configure(self._preview_cfg)
+            self.cam.start()
+            self.apply(self._settings)
+        return rec
 
     def _autofocus(self, settings: Settings) -> None:
         if self.info.has_af and settings.af_mode == "single":
@@ -267,7 +387,7 @@ class PiCamera:
         cfg = self.cam.create_still_configuration(
             main={"size": size or self.info.resolution, "format": "RGB888"},
             raw={} if raw_path else None,
-            buffer_count=1,
+            buffer_count=1, transform=self._transform(),
             controls=self._controls(settings.exp_shutter, gain, settings, still=True),
         )
         req = self.cam.switch_mode_and_capture_request(cfg, wait=True)
@@ -283,13 +403,15 @@ class PiCamera:
         self.apply(settings)
         return img, meta
 
-    def burst(self, settings: Settings, count: int,
-              size: tuple[int, int]) -> list[tuple[Image.Image, FrameMeta]]:
-        """Capture `count` frames back to back in one still mode (fast, reduced size)."""
+    def burst(self, settings: Settings, count: int, size: tuple[int, int],
+              on_frame=None, buffers: int = 2) -> list[tuple[Image.Image, FrameMeta]]:
+        """Capture `count` frames back to back in one still mode. With on_frame,
+        each (image, meta) is handed over as it arrives instead of being kept."""
         self._autofocus(settings)
         gain = settings.exp_iso / 100 if settings.exp_iso else None
         cfg = self.cam.create_still_configuration(
-            main={"size": size, "format": "RGB888"}, raw=None, buffer_count=2,
+            main={"size": size, "format": "RGB888"}, raw=None, buffer_count=buffers,
+            transform=self._transform(),
             controls=self._controls(settings.exp_shutter, gain, settings, still=True))
         frames = []
         self.cam.switch_mode(cfg)
@@ -297,9 +419,13 @@ class PiCamera:
             for _ in range(count):
                 req = self.cam.capture_request()
                 try:
-                    frames.append((req.make_image("main").convert("RGB"), self._meta(req.get_metadata())))
+                    frame = (req.make_image("main").convert("RGB"), self._meta(req.get_metadata()))
                 finally:
                     req.release()
+                if on_frame:
+                    on_frame(*frame)
+                else:
+                    frames.append(frame)
         finally:
             self.cam.switch_mode(self._preview_cfg)
             self.apply(settings)
@@ -319,12 +445,27 @@ class SimCamera:
         self._settings = Settings()
         self._lock: Optional[FrameMeta] = None
         self._t0 = time.monotonic()
+        self.recording: Optional[Recording] = None
+        self.rotated = False
 
     def start(self) -> None:
         pass
 
     def stop(self) -> None:
-        pass
+        self.stop_recording()
+
+    def set_rotation(self, upside_down: bool) -> None:
+        self.rotated = upside_down
+
+    def start_recording(self, raw_path: Path, size: tuple[int, int], fps: int,
+                        settings: Settings) -> Recording:
+        Path(raw_path).write_bytes(b"")
+        self.recording = Recording(Path(raw_path), size, float(fps), time.monotonic())
+        return self.recording
+
+    def stop_recording(self) -> Optional[Recording]:
+        rec, self.recording = self.recording, None
+        return rec
 
     def close(self) -> None:
         pass
@@ -391,8 +532,13 @@ class SimCamera:
             Path(raw_path).write_bytes(b"simulated raw")
         return self._render(size or self.info.resolution, meta), meta
 
-    def burst(self, settings: Settings, count: int,
-              size: tuple[int, int]) -> list[tuple[Image.Image, FrameMeta]]:
+    def burst(self, settings: Settings, count: int, size: tuple[int, int],
+              on_frame=None, buffers: int = 2) -> list[tuple[Image.Image, FrameMeta]]:
         meta = self._exposure(settings, preview=False)
         time.sleep(0.1 * count)
-        return [(self._render(size, meta), meta) for _ in range(count)]
+        frames = [(self._render(size, meta), meta) for _ in range(count)]
+        if on_frame:
+            for f in frames:
+                on_frame(*f)
+            return []
+        return frames

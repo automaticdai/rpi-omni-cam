@@ -9,7 +9,8 @@ from PIL import Image, ImageDraw
 
 from . import exif, filters, ui
 from .buttons import LONG, PRESS, REPEAT, ButtonEvent
-from .exposure import BRACKETS, BURSTS, MODE_PARAMS, format_ev, format_focus, format_iso, format_shutter
+from .exposure import (BRACKETS, BURSTS, MODE_PARAMS, NIGHT_FRAMES, SQ_SIZE, VIDEO_SIZES, format_ev,
+                       format_focus, format_iso, format_shutter)
 from .menu import QUICK, TABS, Action, Choice, Section
 from .storage import Entry
 
@@ -92,13 +93,19 @@ class LiveView(Screen):
             if kind == PRESS:
                 if app.timelapse:
                     app.toast("Hold X to stop timelapse")
+                elif app.s.video_mode:
+                    app.toggle_recording()
                 elif not app.busy:
                     if app.s.self_timer:
                         self.countdown_until = app.now() + app.s.self_timer
                     else:
                         app.take_photo()
             elif kind == LONG:
-                if app.timelapse:
+                if app.double_first is not None:
+                    app.cancel_double()
+                elif app.camera.recording:
+                    pass
+                elif app.timelapse:
                     app.stop_timelapse()
                 elif not app.busy:
                     app.start_timelapse()
@@ -120,6 +127,8 @@ class LiveView(Screen):
         elif b in "AB" and kind in (PRESS, LONG):
             if app.timelapse:
                 app.toast("Timelapse running")
+            elif app.camera.recording:
+                app.toast("Recording: X stops")
             elif b == "A":
                 app.open(MenuView(app) if kind == LONG else QuickMenuView(app))
             else:
@@ -142,6 +151,8 @@ class LiveView(Screen):
         app = self.app
         s = app.s
         frame = ui.fit(app.preview_filtered) if app.preview_filtered else Image.new("RGB", (ui.W, ui.H))
+        if app.double_ghost is not None:  # double exposure: first shot over the view
+            frame = Image.blend(frame, ui.fit(app.double_ghost), 0.45)
         if app.preview_raw is not None and not app.busy:
             # computed on the un-letterboxed preview, then placed like the image
             raw = app.preview_raw
@@ -152,8 +163,12 @@ class LiveView(Screen):
         if app.busy:
             frame = frame.point(lambda v: v // 3)
         layer, d = ui.overlay(frame)
-        if s.aspect != "native" and app.preview_raw is not None:
-            ui.aspect_guides(d, app.preview_raw.size, s.aspect)
+        if s.mode == "MOVIE":  # the video frame, until recording shows it for real
+            aspect = "native" if app.camera.recording else "16:9"
+        else:
+            aspect = "native" if s.video_mode else s.aspect
+        if aspect != "native" and app.preview_raw is not None:
+            ui.aspect_guides(d, app.preview_raw.size, aspect)
         if s.grid != "off":
             ui.grid(d, diagonal=s.grid == "diagonal")
         if s.histogram and app.preview_raw:
@@ -162,8 +177,17 @@ class LiveView(Screen):
         # top strip
         ui.bar(d, 0, 22)
         f = ui.font(13, "bold")
-        top = [(s.mode, False, ui.ACCENT)]
-        if app.timelapse:
+        top = [({"MOVIE": "MOVIE", "SQ": "S&Q"}.get(s.mode, s.mode), False, ui.ACCENT)]
+        if app.clip is not None:
+            secs = int(app.now() - app.clip.started)
+            top.append((f"● REC {secs // 60}:{secs % 60:02d}", False, ui.RED))
+        elif s.video_mode:
+            if s.mode == "SQ":
+                top.append((f"{SQ_SIZE[1]}p {s.sq_fps}fps", False, ui.WHITE))
+            else:
+                top.append((f"{s.video_size} {VIDEO_SIZES[s.video_size][2]}", False, ui.WHITE))
+            top.append((f"{app.video_minutes_left()} min", False, ui.WHITE))
+        elif app.timelapse:
             tl = app.timelapse
             total = f"/{tl.count}" if tl.count else ""
             nxt = max(0, int(tl.next_at - app.now()))
@@ -172,14 +196,26 @@ class LiveView(Screen):
             left = app.shots_left()
             top.append((f"● {left if left < 10000 else '9999+'}", False,
                         ui.RED if left < 10 else ui.WHITE))
-        if s.drive in BURSTS:
+        if s.video_mode:
+            pass
+        elif s.drive in BURSTS:
             top.append((f"BURST{BURSTS[s.drive]}", False, ui.WHITE))
         elif s.drive in BRACKETS:
             top.append((f"BKT{len(BRACKETS[s.drive])}", False, ui.WHITE))
-        if s.self_timer:
+        elif s.drive in NIGHT_FRAMES:
+            top.append((f"NIGHT{NIGHT_FRAMES[s.drive]}", False, ui.WHITE))
+        elif s.drive == "double":
+            top.append(("DBL 2/2" if app.double_first else "DBL 1/2", False,
+                        ui.ACCENT if app.double_first else ui.WHITE))
+        if s.self_timer and not s.video_mode:
             top.append((f"T{s.self_timer}s", False, ui.WHITE))
-        if s.save_raw:
+        if s.save_raw and not s.video_mode:
             top.append(("RAW", False, ui.WHITE))
+        if app.post.label:
+            pct = f" {app.post.progress * 100:.0f}%" if app.post.progress is not None else "…"
+            top.append(("MP4" + pct, False, ui.GREY))
+        if app.web is not None:
+            top.append(("WEB", False, ui.GREEN if app.web_url else ui.GREY))
         if app.camera.info.has_af and s.af_mode != "manual":
             top.append(({"continuous": "AF-C", "single": "AF-S"}.get(s.af_mode, "AF"), False, ui.GREY))
         if app.magnify > 1:
@@ -230,9 +266,14 @@ class LiveView(Screen):
         if self.countdown_until is not None:
             n = max(1, int(self.countdown_until - app.now() + 0.999))
             ui.centered(d, 80, str(n), ui.font(64, "bold"), ui.ACCENT)
-        elif app.job and app.job.kind == "photo":
+        elif app.job and app.job.kind in ("photo", "double1"):
             remaining = app.job.remaining(app.now())
-            msg = f"Exposing… {remaining:.0f}s" if remaining and remaining >= 1 else "Saving…"
+            if remaining and remaining >= 1:
+                msg = f"Exposing… {remaining:.0f}s"
+            elif s.drive in NIGHT_FRAMES:
+                msg = "Night shot: hold still…"
+            else:
+                msg = "Saving…"
             ui.centered(d, 100, msg, ui.font(20, "bold"))
         return ui.flatten(frame, layer)
 
@@ -406,7 +447,7 @@ class MenuView(Screen):
 
     def _help(self, d: ImageDraw.ImageDraw, text: str) -> None:
         f = ui.font(11)
-        lines = ui.wrap(d, text, f, ui.W - 16)[:2]
+        lines = ui.wrap(d, ui.keys(text), f, ui.W - 16)[:2]
         y = ui.H - 18 - 4 - 15 * len(lines)
         d.line([(8, y - 4), (ui.W - 8, y - 4)], fill=(60, 60, 66))
         for i, line in enumerate(lines):
@@ -553,97 +594,233 @@ class QuickMenuView(Screen):
                        fill=ui.GREY if last else ui.ACCENT)
         hint = ("A ◀  B ▶   Y keep   X cancel" if self.editing
                 else "A/B move   Y change   X close   hold A: menu")
-        ui.centered(d, ui.H - 15, hint, ui.font(10, "bold"), ui.GREY)
+        ui.centered(d, ui.H - 15, ui.keys(hint), ui.font(10, "bold"), ui.GREY)
         return ui.flatten(base, layer)
 
 
 # ---------------------------------------------------------------------------
 class PlaybackView(Screen):
+    """A/B: previous/next. Y: cycle the information shown (basic → details with
+    histogram → none); on a video or timelapse with an MP4, Y plays/pauses and
+    A/B skip 5 s while it plays. Hold Y: delete. X: stop the video, or back."""
+
+    SKIP_S = 5.0
+
+    INFO_MODES = ("basic", "details", "none")
+
     def __init__(self, app: "App"):
         super().__init__(app)
         self.entries: list[Entry] = app.storage.entries()
         self.index = 0
-        self.zoom = False
+        self.info_mode = 0
         self._cache: tuple = (None, None, None)  # (key, image, info)
+        self._durations: dict = {}
+        self.player = None
+
+    def stop_video(self) -> None:
+        if self.player is not None:
+            self.player.close()
+            self.player = None
+
+    def reload(self) -> None:
+        self.stop_video()
+        current = self.entries[self.index].key if self.entries else None
+        self.entries = self.app.storage.entries()
+        keys = [e.key for e in self.entries]
+        self.index = keys.index(current) if current in keys else min(self.index, max(0, len(keys) - 1))
+        self._cache = (None, None, None)
 
     def _load(self) -> tuple[Optional[Image.Image], dict]:
         if not self.entries:
             return None, {}
         entry = self.entries[self.index]
-        key = (entry.path, self.zoom)
+        key = entry.path
         if self._cache[0] == key:
             return self._cache[1], self._cache[2]
         try:
             with Image.open(entry.path) as im:
                 info = exif.read(im)
-                if self.zoom:  # 100 % centre crop
-                    cx, cy = im.width // 2, im.height // 2
-                    img = im.crop((cx - ui.W // 2, cy - ui.H // 2, cx + ui.W // 2, cy + ui.H // 2))
-                else:
-                    im.draft("RGB", (ui.W, ui.H))  # fast reduced-size JPEG decode
-                    img = ui.fit(im.convert("RGB"))
-                img = img.convert("RGB")
+                info["size"] = im.size
+                im.draft("RGB", (ui.W, ui.H))  # fast reduced-size JPEG decode
+                img = ui.fit(im.convert("RGB")).convert("RGB")
+            if not entry.is_video:
+                info["bytes"] = entry.path.stat().st_size
         except (OSError, ValueError):
             img, info = None, {"error": True}
         self._cache = (key, img, info)
         return img, info
 
+    def _duration(self, entry: Entry) -> Optional[float]:
+        if entry.video is None:
+            return None
+        if entry.video not in self._durations:
+            from . import video
+
+            self._durations[entry.video] = video.duration_s(entry.video)
+        return self._durations[entry.video]
+
     def on_button(self, ev: ButtonEvent) -> None:
-        if ev.button in "AB" and self.entries:
+        player = self.player
+        if ev.button in "AB" and player is not None and player.playing:
+            player.seek(self.SKIP_S * (-1 if ev.button == "A" else 1))
+        elif ev.button in "AB" and self.entries:
+            self.stop_video()
             self.index = (self.index + _moves(ev)) % len(self.entries)
-            self.zoom = False
-        elif ev.button == "X" and ev.kind == PRESS:  # back: leave zoom, then playback
-            if self.zoom:
-                self.zoom = False
+        elif ev.button == "X" and ev.kind == PRESS:
+            if player is not None:
+                self.stop_video()
             else:
                 self.app.back_to_live()
         elif ev.button == "Y" and self.entries:
-            if ev.kind == PRESS:
-                self.zoom = not self.zoom
+            entry = self.entries[self.index]
+            if ev.kind == PRESS and entry.video is not None:
+                if player is None:
+                    from .video import Player
+
+                    self.player = Player(entry.video, (ui.W, ui.H))
+                else:
+                    player.toggle()
+            elif ev.kind == PRESS:
+                self.info_mode = (self.info_mode + 1) % len(self.INFO_MODES)
             elif ev.kind == LONG:
-                entry = self.entries[self.index]
-                what = f"timelapse ({entry.frames} frames)" if entry.frames > 1 else entry.path.name
+                self.stop_video()
+                if entry.frames > 1:
+                    what = f"timelapse ({entry.frames} frames)"
+                else:
+                    what = entry.path.with_suffix(".mp4").name if entry.is_video else entry.path.name
                 self.app.open(ConfirmView(self.app, f"Delete {what}?", "Delete",
                                           lambda: self._delete(entry), back=self))
 
+    def _render_video(self) -> Image.Image:
+        p = self.player
+        frame = p.current()
+        entry = self.entries[self.index]
+        if frame is None:
+            img, _ = self._load()
+            frame = img if img is not None else Image.new("RGB", (ui.W, ui.H))
+        img = ui.fit(frame)
+        layer, d = ui.overlay(img)
+        f = ui.font(13, "bold")
+        if p.error:
+            ui.centered(d, 100, "Can't play this video", ui.font(16, "bold"), ui.RED)
+        ui.bar(d, ui.H - 26, ui.H)
+        if p.playing:  # pause bars
+            d.rectangle([10, ui.H - 20, 13, ui.H - 7], fill=ui.ACCENT)
+            d.rectangle([18, ui.H - 20, 21, ui.H - 7], fill=ui.ACCENT)
+        else:  # play triangle
+            d.polygon([(10, ui.H - 20), (10, ui.H - 7), (22, ui.H - 13)], fill=ui.ACCENT)
+        dur = p.duration or self._duration(entry)
+        times = f"{self._clock(p.position)} / {self._clock(dur)}"
+        tw = ui.text_w(d, times, f)
+        d.text((ui.W - 8 - tw, ui.H - 21), times, font=f, fill=ui.WHITE)
+        x0, x1, y = 34, ui.W - 16 - tw, ui.H - 13
+        d.line([(x0, y), (x1, y)], fill=(90, 90, 96), width=3)
+        if dur:
+            xp = x0 + int((x1 - x0) * min(1.0, p.position / dur))
+            d.line([(x0, y), (xp, y)], fill=ui.ACCENT, width=3)
+            d.ellipse([xp - 4, y - 4, xp + 4, y + 4], fill=ui.ACCENT)
+        if not p.playing and not p.error:
+            hint = "Y play · X stop · A/B next" if not p.ended else "Y replay · X stop"
+            ui.centered(d, 4, ui.keys(hint), ui.font(11, "bold"), ui.GREY)
+        return ui.flatten(img, layer)
+
     def _delete(self, entry: Entry) -> None:
+        if self.app.clip and entry.video == self.app.clip.path:
+            self.app.toast("Still recording", ui.RED)
+            self.app.open(self)
+            return
         self.app.storage.delete(entry)
         self.app.refresh_storage()
-        self.entries = self.app.storage.entries()
-        self.index = min(self.index, max(0, len(self.entries) - 1))
-        self._cache = (None, None, None)
+        self.reload()
         self.app.toast("Deleted")
         self.app.open(self)
 
+    @staticmethod
+    def _bytes(n: int) -> str:
+        return f"{n / 1e6:.1f} MB" if n >= 1e6 else f"{n / 1e3:.0f} kB"
+
     def render(self) -> Image.Image:
+        if self.player is not None and self.entries:
+            return self._render_video()
         img, info = self._load()
         if img is None:
             canvas, d = ui.panel_screen("Playback")
             msg = "No photos yet" if not self.entries else "Can't open this file"
             ui.centered(d, 105, msg, ui.font(16), ui.GREY)
-            ui.hints(d, "", "Y back")
+            ui.hints(d, "", "X back")
             return canvas
-        if self.app.s.zebras:
+        mode = self.INFO_MODES[self.info_mode]
+        if self.app.s.zebras and mode != "none":
             img = ui.flatten(img, ui.zebras(img, int(time.monotonic() * 8) % 8))
-        layer, d = ui.overlay(img)
+        if mode == "none":
+            return img
         entry = self.entries[self.index]
+        layer, d = ui.overlay(img)
         f, fs = ui.font(13, "bold"), ui.font(12)
         ui.bar(d, 0, 20)
         d.text((6, 3), f"{self.index + 1}/{len(self.entries)}  {entry.title}", font=f, fill=ui.WHITE)
-        if self.zoom:
-            d.text((ui.W - 46, 3), "100%", font=f, fill=ui.ACCENT)
-        ui.bar(d, ui.H - 20, ui.H)
-        parts = []
-        if entry.frames > 1:
-            parts.append(f"Timelapse · {entry.frames} frames")
-        if "exposure_s" in info:
-            parts.append(format_shutter(info["exposure_s"]))
-        if "iso" in info:
-            parts.append(f"ISO {info['iso']}")
-        if "datetime" in info:
-            parts.append(info["datetime"].strftime("%H:%M:%S"))
-        d.text((6, ui.H - 17), "  ".join(parts), font=fs, fill=ui.WHITE)
+        duration = self._duration(entry)
+        if entry.is_video or entry.frames > 1:
+            label = "▶ VIDEO" if entry.is_video else (f"TL {entry.frames}" + (" ▶" if entry.video else ""))
+            d.text((ui.W - 6 - ui.text_w(d, label, f), 3), label, font=f, fill=ui.ACCENT)
+        if mode == "details":
+            self._details(d, img, entry, info, duration)
+        else:
+            ui.bar(d, ui.H - 20, ui.H)
+            parts = []
+            if entry.is_video:
+                parts.append((f"Video {self._clock(duration)}" if duration else "Video") + ui.keys(" · Y play"))
+            elif entry.frames > 1:
+                parts.append(f"Timelapse · {entry.frames} frames" + (ui.keys(" · Y play") if entry.video else ""))
+            if not entry.is_video:
+                if "exposure_s" in info:
+                    parts.append(format_shutter(info["exposure_s"]))
+                if "iso" in info:
+                    parts.append(f"ISO {info['iso']}")
+            if "datetime" in info:
+                parts.append(info["datetime"].strftime("%H:%M:%S"))
+            d.text((6, ui.H - 17), "  ".join(parts), font=fs, fill=ui.WHITE)
         return ui.flatten(img, layer)
+
+    @staticmethod
+    def _clock(seconds: Optional[float]) -> str:
+        if not seconds:
+            return "--:--"
+        s = int(round(seconds))
+        return f"{s // 60}:{s % 60:02d}"
+
+    def _details(self, d: ImageDraw.ImageDraw, img: Image.Image, entry: Entry, info: dict,
+                 duration: Optional[float]) -> None:
+        d.rectangle([0, 20, 150, ui.H], fill=(0, 0, 0, 170))
+        lines = []
+        if "datetime" in info:
+            lines.append(info["datetime"].strftime("%Y-%m-%d %H:%M:%S"))
+        if entry.is_video:
+            lines.append(f"Length {self._clock(duration)}")
+            try:
+                lines.append(self._bytes(entry.video.stat().st_size))
+            except (OSError, AttributeError):
+                pass
+        else:
+            if "exposure_s" in info:
+                lines.append(f"Shutter {format_shutter(info['exposure_s'])}")
+            if "iso" in info:
+                lines.append(f"ISO {info['iso']}")
+            if "ev" in info:
+                lines.append(f"EV {format_ev(info['ev'])}")
+            if "size" in info:
+                w, h = info["size"]
+                lines.append(f"{w}×{h} ({w * h / 1e6:.1f} MP)")
+            if "bytes" in info:
+                lines.append(self._bytes(info["bytes"]))
+            if any(p.suffix.lower() == ".dng" for p in entry.delete_paths):
+                lines.append("+ RAW (DNG)")
+        if entry.frames > 1:
+            lines.append(f"{entry.frames} frames" + (" + MP4" if entry.video else ""))
+        fs = ui.font(12)
+        for i, line in enumerate(lines[:9]):
+            d.text((8, 28 + i * 19), line, font=fs, fill=ui.WHITE)
+        ui.histogram(d, img, box=(ui.W - 104, 26, ui.W - 6, 80))
 
 
 # ---------------------------------------------------------------------------
@@ -733,7 +910,7 @@ class WelcomeView(Screen):
         d.ellipse([cx + 30, cy - 18, cx + 37, cy - 11], fill=ui.RED)
         ui.centered(d, 128, "omnicam", ui.font(34, "bold"), ui.WHITE)
         ui.centered(d, 172, f"version {__version__}", ui.font(13), ui.GREY)
-        ui.centered(d, 210, "Hold Y for 3 s to turn off", ui.font(11), ui.GREY)
+        ui.centered(d, 210, ui.keys("Hold Y for 3 s to turn off"), ui.font(11), ui.GREY)
         return img
 
 
@@ -765,11 +942,167 @@ class ExportView(Screen):
                     "marked USB) to a computer.")
         ui.centered(d, 44, head, fb, col)
         y = 76
-        for line in ui.wrap(d, body, f, ui.W - 30):
+        for line in ui.wrap(d, ui.keys(body), f, ui.W - 30):
             ui.centered(d, y, line, f)
             y += 20
         ui.centered(d, ui.H - 46, "No photos can be taken during export.", ui.font(12), ui.GREY)
         ui.hints(d, "", "X stop export")
+        return img
+
+
+class DateTimeView(Screen):
+    """Set the clock: Y moves through year, month, day, hour, minute; A/B change
+    the highlighted field (hold to repeat); Y on the last field saves, X cancels."""
+
+    FIELDS = ("year", "month", "day", "hour", "minute")
+    NAMES = ("Year", "Month", "Day", "Hour", "Minute")
+
+    def __init__(self, app: "App", back: Optional[Screen] = None):
+        super().__init__(app)
+        from datetime import datetime
+
+        now = datetime.now()
+        self.values = {"year": max(now.year, 2024), "month": now.month, "day": now.day,
+                       "hour": now.hour, "minute": now.minute}
+        self.field = 0
+        self.back = back
+        self.synced = app.system.time_synced()
+
+    @staticmethod
+    def _days_in(year: int, month: int) -> int:
+        import calendar
+
+        return calendar.monthrange(year, month)[1]
+
+    def _bounds(self, name: str) -> tuple[int, int]:
+        v = self.values
+        return {"year": (2024, 2099), "month": (1, 12),
+                "day": (1, self._days_in(v["year"], v["month"])),
+                "hour": (0, 23), "minute": (0, 59)}[name]
+
+    def _step(self, d: int) -> None:
+        name = self.FIELDS[self.field]
+        lo, hi = self._bounds(name)
+        v = self.values[name] + d
+        self.values[name] = hi if v < lo else lo if v > hi else v  # wraps like a clock
+        self.values["day"] = min(self.values["day"], self._bounds("day")[1])  # 31 Jan -> Feb
+
+    def selected_datetime(self):
+        from datetime import datetime
+
+        return datetime(**self.values)
+
+    def _leave(self) -> None:
+        if self.back:
+            self.app.open(self.back)
+        else:
+            self.app.back_to_live()
+
+    def on_button(self, ev: ButtonEvent) -> None:
+        b, kind = ev.button, ev.kind
+        if b in "AB" and kind in (PRESS, LONG, REPEAT):
+            self._step(-1 if b == "A" else 1)
+        elif kind == PRESS and b == "Y":
+            if self.field < len(self.FIELDS) - 1:
+                self.field += 1
+            else:
+                self.app.set_clock(self.selected_datetime())
+                self._leave()
+        elif kind == PRESS and b == "X":
+            self._leave()
+
+    def render(self) -> Image.Image:
+        img, d = ui.panel_screen("Date & time")
+        v = self.values
+        parts = [(f"{v['year']:04d}", 0), ("-", None), (f"{v['month']:02d}", 1), ("-", None),
+                 (f"{v['day']:02d}", 2), ("  ", None), (f"{v['hour']:02d}", 3), (":", None),
+                 (f"{v['minute']:02d}", 4)]
+        f = ui.font(28, "bold")
+        total = sum(ui.text_w(d, t, f) for t, _ in parts)
+        x, y = (ui.W - total) // 2, 66
+        for text, idx in parts:
+            w = ui.text_w(d, text, f)
+            if idx == self.field:
+                d.rounded_rectangle([x - 3, y - 2, x + w + 3, y + 34], 4, fill=ui.ACCENT)
+                d.text((x, y), text, font=f, fill=(0, 0, 0))
+            else:
+                d.text((x, y), text, font=f, fill=ui.WHITE if idx is not None else ui.GREY)
+            x += w
+        ui.centered(d, 114, f"Setting: {self.NAMES[self.field]}", ui.font(13), ui.ACCENT)
+        if self.synced:
+            note, col = "Clock is synced from the network", ui.GREEN
+        else:
+            note, col = "No network time - set the clock here", ui.GREY
+        ui.centered(d, 148, note, ui.font(12), col)
+        ui.centered(d, 168, "Seconds are set to 00", ui.font(11), ui.GREY)
+        last = self.field == len(self.FIELDS) - 1
+        ui.hints(d, "A −  B +", "Y save · X cancel" if last else "Y next · X cancel")
+        return img
+
+
+class ConnectionView(Screen):
+    """Wi-Fi status and QR codes for the phone page (A/B switch the code)."""
+
+    def __init__(self, app: "App", back: Optional[Screen] = None):
+        super().__init__(app)
+        self.back = back
+        self.page = 0
+
+    def _codes(self) -> list[tuple[str, str]]:
+        """(caption, QR text) pages for the current state."""
+        app, st = self.app, self.app.network.status
+        out = []
+        if st.hotspot:
+            pw = app.s.hotspot_password
+            out.append((f"1. Join {st.ssid}", f"WIFI:T:WPA;S:{st.ssid};P:{pw};;"))
+        if app.web_url:
+            out.append(("2. Open the camera page" if st.hotspot else "Open on your phone", app.web_url))
+        return out
+
+    def on_button(self, ev: ButtonEvent) -> None:
+        n = max(1, len(self._codes()))
+        if ev.button in "AB" and ev.kind == PRESS:
+            self.page = (self.page + (1 if ev.button == "B" else -1)) % n
+        elif ev.kind == PRESS and ev.button in "XY":
+            if self.back:
+                self.app.open(self.back)
+            else:
+                self.app.back_to_live()
+
+    def render(self) -> Image.Image:
+        app = self.app
+        st = app.network.status
+        img, d = ui.panel_screen("Wi-Fi & Remote")
+        f, fb = ui.font(12), ui.font(13, "bold")
+        lines = [(st.summary, fb, ui.GREEN if st.connected else ui.ACCENT if st.busy else ui.GREY)]
+        if st.hotspot:
+            lines.append((f"Password: {app.s.hotspot_password}", f, ui.WHITE))
+        if st.ip:
+            lines.append((f"Address: {st.ip}", f, ui.WHITE))
+        if not app.s.web:
+            lines.append(("Phone access is off", fb, ui.RED))
+            lines.append(("Turn it on in this menu", f, ui.GREY))
+        elif app.web_url:
+            lines.append((app.web_url, fb, ui.ACCENT))
+        else:
+            lines.append(("Waiting for the network…", f, ui.GREY))
+        codes = self._codes()
+        text_w = ui.W - 12 if not codes else 164
+        y = 32
+        for text, font_, col in lines:
+            for part in ui.wrap(d, text, font_, text_w):
+                d.text((10, y), part, font=font_, fill=col)
+                y += 18
+        if codes:
+            self.page %= len(codes)
+            caption, data = codes[self.page]
+            if ui.qr(d, data, ui.W - 146, 30, 140):
+                for i, part in enumerate(ui.wrap(d, caption, ui.font(11), 140)[:2]):
+                    tw = ui.text_w(d, part, ui.font(11))
+                    d.text((ui.W - 76 - tw // 2, 174 + i * 14), part, font=ui.font(11), fill=ui.GREY)
+            else:
+                d.text((10, y + 6), "Install python3-segno for QR codes", font=f, fill=ui.GREY)
+        ui.hints(d, "A/B next code" if len(codes) > 1 else "", "X back")
         return img
 
 

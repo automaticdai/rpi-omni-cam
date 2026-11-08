@@ -9,14 +9,18 @@ SHUTTER_STEPS: tuple[float, ...] = (
     1 / 4000, 1 / 2000, 1 / 1000, 1 / 500, 1 / 250, 1 / 125, 1 / 60, 1 / 30,
     1 / 15, 1 / 8, 1 / 4, 1 / 2, 1,
 )
-MAX_SHUTTER_S = SHUTTER_STEPS[-1]  # longest shutter offered (1 s)
+MAX_SHUTTER_S = SHUTTER_STEPS[-1]  # longest shutter normally offered (1 s)
+# With "Long exposures" on, these follow (as far as the sensor allows).
+LONG_SHUTTER_STEPS: tuple[float, ...] = (2, 4, 8, 15, 30, 60, 120, 240)
+LONG_SHUTTER_S = LONG_SHUTTER_STEPS[-1]
 ISO_STEPS: tuple[int, ...] = (100, 200, 400, 800, 1600, 3200)
 EV_STEPS: tuple[float, ...] = (-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0)
 
 
-def shutter_steps(max_exposure_s: float) -> list[float]:
-    """Shutter steps the sensor can actually do."""
-    steps = [s for s in SHUTTER_STEPS if s <= max_exposure_s * 1.001]
+def shutter_steps(max_exposure_s: float, long: bool = False) -> list[float]:
+    """Shutter steps the sensor can actually do (past 1 s only with `long`)."""
+    table = SHUTTER_STEPS + LONG_SHUTTER_STEPS if long else SHUTTER_STEPS
+    steps = [s for s in table if s <= max_exposure_s * 1.001]
     return steps or [SHUTTER_STEPS[0]]
 
 
@@ -62,13 +66,23 @@ def bracket_exposure(shutter: float, gain: float, ev: float, max_shutter: float,
 
 
 # Mode -> values the A/B buttons adjust in live view (Y cycles between them).
-MODES = ("P", "A", "S", "M")  # Sony naming and order
+MODES = ("P", "A", "S", "M", "MOVIE", "SQ")  # Sony naming and order
 MODE_PARAMS: dict[str, tuple[str, ...]] = {
     "P": ("ev",),
     "A": ("iso", "ev"),   # aperture priority: aperture on the lens ring, ISO here
     "S": ("shutter", "ev"),
     "M": ("shutter", "iso"),
+    "MOVIE": ("ev",),
+    "SQ": ("ev",),
 }
+
+# Drive: night mode stacks this many frames into one photo.
+NIGHT_FRAMES: dict[str, int] = {"night4": 4, "night8": 8}
+
+# Video: (width, height, fps) for each video size; slow motion is 640x480.
+VIDEO_SIZES: dict[str, tuple[int, int, int]] = {"1080p": (1920, 1080, 30), "720p": (1280, 720, 30)}
+SQ_SIZE = (640, 480)
+SQ_PLAYBACK_FPS = 30
 
 
 def step(values: Sequence[float], current: float, direction: int, log: bool = True) -> float:

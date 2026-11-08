@@ -16,15 +16,18 @@ DEFAULT_CONFIG_PATH = Path(
 @dataclass
 class Settings:
     # Exposure mode, Sony naming: P (all auto), A (aperture priority: ISO set,
-    # aperture on the lens ring, shutter auto), S (shutter set), M (both set).
-    # shutter/iso hold the manual values; they only apply in modes that use them.
+    # aperture on the lens ring, shutter auto), S (shutter set), M (both set),
+    # MOVIE (video) and SQ (slow motion). shutter/iso hold the manual values;
+    # they only apply in modes that use them.
     mode: str = "P"
     shutter: float = 1 / 125  # seconds
     iso: int = 200
     ev: float = 0.0
     wb: str = "auto"
     metering: str = "centre"  # centre | spot | matrix
-    drive: str = "single"  # single | burst5 | burst10 | bracket3_1 | bracket3_2 | bracket5_1
+    # single | burst5 | burst10 | bracket3_1 | bracket3_2 | bracket5_1 | night4 | night8 | double
+    drive: str = "single"
+    long_exposure: bool = False  # offer shutter speeds past 1 s
     # Focus (autofocus cameras only)
     af_mode: str = "continuous"  # continuous | single | manual
     lens_position: float = 1.0  # dioptres (1/m); 0 = infinity
@@ -43,6 +46,11 @@ class Settings:
     tl_interval: int = 10  # seconds
     tl_count: int = 0  # 0 = unlimited
     tl_lock_exposure: bool = True
+    tl_video: bool = True  # make an MP4 from the frames when the timelapse ends
+    tl_video_fps: int = 24
+    # Video
+    video_size: str = "1080p"  # 1080p | 720p
+    sq_fps: int = 120  # slow-motion capture rate; played back at 30 fps
     # Display
     grid: str = "off"  # off | thirds | diagonal (thirds + diagonals)
     histogram: bool = False
@@ -53,6 +61,15 @@ class Settings:
     # Controls
     fn_button: str = "playback"  # B press in live view, see menu.FN_ACTIONS
     fn_button_long: str = "magnify"  # B hold (0.7 s) in live view; "none" = nothing
+    left_handed: bool = False  # mirror the buttons: A<->X, B<->Y
+    rotate180: bool = False  # camera mounted upside down: rotate screen, image and buttons
+    # Wi-Fi and the phone web page
+    wifi: str = "home"  # off | home | hotspot | auto (home, else hotspot)
+    web: bool = False  # phone gallery / remote over Wi-Fi
+    hotspot_password: str = ""  # generated on first use
+    # Saved setting sets (Custom 1/2): {setting: value}
+    custom1: Optional[dict] = None
+    custom2: Optional[dict] = None
     # Storage
     photo_dir: str = "/media/photos"
 
@@ -71,12 +88,13 @@ class Settings:
             if f.name in data:
                 setattr(settings, f.name, data[f.name])
         settings.mode = {"Tv": "S", "Sv": "A"}.get(settings.mode, settings.mode)  # pre-0.3 names
-        if settings.mode not in ("P", "A", "S", "M"):
+        if settings.mode not in ("P", "A", "S", "M", "MOVIE", "SQ"):
             settings.mode = defaults.mode
         if not settings.shutter:  # older files stored None for AUTO
             settings.shutter = defaults.shutter
-        from .exposure import MAX_SHUTTER_S
-        settings.shutter = min(settings.shutter, MAX_SHUTTER_S)
+        from .exposure import LONG_SHUTTER_S, MAX_SHUTTER_S
+        settings.shutter = min(settings.shutter,
+                               LONG_SHUTTER_S if settings.long_exposure else MAX_SHUTTER_S)
         if not settings.iso:
             settings.iso = defaults.iso
         if isinstance(settings.grid, bool):  # pre-0.4: grid was on/off
@@ -94,6 +112,10 @@ class Settings:
     def exp_iso(self) -> Optional[int]:
         """ISO to use, or None when the mode leaves it to auto-exposure."""
         return self.iso if self.mode in ("A", "M") else None
+
+    @property
+    def video_mode(self) -> bool:
+        return self.mode in ("MOVIE", "SQ")
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
         path = Path(path)

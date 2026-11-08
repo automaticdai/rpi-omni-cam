@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -14,18 +16,23 @@ from typing import Any, Callable, Optional
 
 from PIL import Image
 
-from . import __version__, exif, filters, sysinfo, ui
+from . import __version__, exif, filters, stack, sysinfo, ui, video
 from .buttons import LONG, POWER, ButtonTracker
 from .battery import Battery
 from .camera import FrameMeta, scaled_size
 from .config import DEFAULT_CONFIG_PATH, Settings
-from .exposure import (BRACKETS, BURSTS, EV_STEPS, FOCUS_STEPS, MAX_SHUTTER_S,
+from .exposure import (BRACKETS, BURSTS, EV_STEPS, FOCUS_STEPS, LONG_SHUTTER_S, MAX_SHUTTER_S,
+                       NIGHT_FRAMES, SQ_PLAYBACK_FPS, SQ_SIZE, VIDEO_SIZES,
                        bracket_exposure, format_shutter, iso_steps, shutter_steps, step)
-from .screens import (BusyView, ConfirmView, ExportView, InfoView, LiveView,
-                      MenuView, PlaybackView, ReviewView, Screen, WelcomeView)
+from .network import Network, NoNetwork, new_password
+from .screens import (BusyView, ConfirmView, ConnectionView, DateTimeView, ExportView, InfoView,
+                      LiveView, MenuView, PlaybackView, ReviewView, Screen, WelcomeView)
 from .storage import PHOTO_IMAGE, Storage
 
 SAVE_DEBOUNCE_S = 2.0
+VIDEO_MIN_FREE = 50 * 1024 * 1024  # stop recording before the storage is full
+VIDEO_MAX_BYTES = 3_900_000_000  # FAT32 file size limit is 4 GiB
+STREAM_INTERVAL_S = 1 / 8  # phone live view frame rate
 log = logging.getLogger("omnicam")
 
 
@@ -58,6 +65,79 @@ class Job:
         if not self.expected_s:
             return None
         return max(0.0, self.expected_s - (now - self.started))
+
+
+class PostWorker:
+    """One background thread for slow follow-up work (making video files)
+    that must not block shooting. Results are collected by the main loop."""
+
+    def __init__(self):
+        self._q: queue.Queue = queue.Queue()
+        self._done: queue.Queue = queue.Queue()
+        self.label = ""
+        self.progress: Optional[float] = None
+        self._pending = 0
+        self._lock = threading.Lock()
+        threading.Thread(target=self._loop, daemon=True, name="post").start()
+
+    def add(self, label: str, fn: Callable[[Callable[[float], None]], Any],
+            on_done: Optional[Callable[[Any], None]] = None) -> None:
+        with self._lock:
+            self._pending += 1
+        self._q.put((label, fn, on_done))
+
+    @property
+    def busy(self) -> bool:
+        return self._pending > 0
+
+    def _set_progress(self, value: float) -> None:
+        self.progress = value
+
+    def _loop(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None:
+                self._q.task_done()
+                return
+            label, fn, on_done = item
+            self.label, self.progress = label, None
+            try:
+                result, error = fn(self._set_progress), None
+            except Exception as e:
+                result, error = None, e
+            self._done.put((label, result, error, on_done))
+            self.label, self.progress = "", None
+            with self._lock:
+                self._pending -= 1
+            self._q.task_done()
+
+    def poll(self) -> list:
+        out = []
+        while True:
+            try:
+                out.append(self._done.get_nowait())
+            except queue.Empty:
+                return out
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait until idle; False on timeout."""
+        end = None if timeout is None else time.monotonic() + timeout
+        while self.busy:
+            if end is not None and time.monotonic() > end:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def close(self) -> None:
+        self._q.put(None)
+
+
+@dataclass
+class VideoClip:
+    path: Path  # final MP4
+    raw: Path  # H.264 being written
+    started: float  # app clock
+    playback_fps: Optional[float]  # None: the capture rate
 
 
 @dataclass
@@ -107,6 +187,25 @@ class System:
             log.warning("fsck.vfat returned %d: %s", fsck.returncode, fsck.stdout[-300:])
         self._run("mount", str(mount))
 
+    def set_time(self, when: datetime) -> None:
+        """Set the system clock. The Pi has no RTC, so also record the time where
+        the OS restores the clock from at boot (systemd-timesyncd / fake-hwclock)."""
+        self._run("date", "-s", when.strftime("%Y-%m-%d %H:%M:%S"))
+        stamp = Path("/var/lib/systemd/timesync/clock")
+        if stamp.exists():
+            os.utime(stamp, None)  # timesyncd won't start the clock earlier than this
+        if shutil.which("fake-hwclock"):
+            subprocess.run(["fake-hwclock", "save", "force"], capture_output=True)
+
+    def time_synced(self) -> Optional[bool]:
+        """True if the clock is synced from the network, None if unknown."""
+        try:
+            out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                                 capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return {"yes": True, "no": False}.get(out)
+
     def usb_state(self) -> str:
         """USB device-port state: 'configured' when a computer is using the drive."""
         for state in sorted(Path("/sys/class/udc").glob("*/state")):
@@ -130,6 +229,18 @@ class SimSystem(System):
     def usb_state(self) -> str:
         return "configured"
 
+    def set_time(self, when: datetime) -> None:
+        self.time_set_to = when
+
+    def time_synced(self) -> Optional[bool]:
+        return False
+
+
+def ui_format_ev(ev: float) -> str:
+    from .exposure import format_ev
+
+    return format_ev(ev)
+
 
 def read_temperature() -> Optional[float]:
     try:
@@ -143,7 +254,8 @@ class App:
     def __init__(self, camera, display, settings: Settings, *,
                  settings_path: Path = DEFAULT_CONFIG_PATH, require_mount: bool = True,
                  system: Optional[System] = None, clock: Callable[[], float] = time.monotonic,
-                 start_on: bool = False):
+                 start_on: bool = False, network: Optional[Network] = None,
+                 web_port: int = 80, web_host: str = "0.0.0.0"):
         self.camera, self.display, self.s = camera, display, settings
         # Standby: the camera starts off; holding Y for 3 s turns it on/off.
         self.powered = start_on
@@ -179,9 +291,33 @@ class App:
         self._avg_jpeg: Optional[float] = None
         self._shots_cache: Optional[tuple[int, float]] = None
         self.running = True
+        # video, night/double exposure, background work
+        self.clip: Optional[VideoClip] = None
+        self._clip_check_at = 0.0
+        self.double_first: Optional[tuple[Image.Image, FrameMeta]] = None
+        self.double_ghost: Optional[Image.Image] = None
+        self.post = PostWorker()
+        # Wi-Fi and the phone page
+        self.network = network or (Network() if shutil.which("nmcli") else NoNetwork())
+        self.web = None
+        self._web_port, self._web_host = web_port, web_host
+        self._web_q: queue.Queue = queue.Queue()
+        self.stream_clients = 0
+        self.stream_jpeg: Optional[bytes] = None
+        self._stream_at = 0.0
+        self.keymap: dict[str, str] = {}
+        self.update_keymap()
 
     # ---- lifecycle ----------------------------------------------------
     def start(self) -> None:
+        if self.s.rotate180:
+            self.camera.set_rotation(True)
+        if not self.s.hotspot_password:
+            self.s.hotspot_password = new_password()
+            self.mark_dirty()
+        self.network.start(self.s.wifi, self.s.hotspot_password)
+        if self.s.web:
+            self._set_web(True)
         if self.powered:
             self.camera.start()
             self.camera.apply(self.s)
@@ -206,8 +342,14 @@ class App:
             self.close()
 
     def close(self) -> None:
+        if self.camera.recording:
+            self.stop_recording()
         if self.job:
             self.job.wait(10)
+        self.post.wait(60)  # e.g. finish wrapping a just-stopped video
+        self.post.close()
+        self._set_web(False)
+        self.network.close()
         if self._dirty_at is not None:
             self.s.save(self.settings_path)
         self.camera.close()
@@ -216,7 +358,9 @@ class App:
     # ---- one iteration ------------------------------------------------
     def step(self) -> None:
         now = self.now()
-        pressed = self.display.pressed()
+        pressed = {self.keymap.get(b, b) for b in self.display.pressed()}
+        self._process_web()
+        self._finish_post()
         if not self.powered:
             self._step_standby(pressed, now)
             return
@@ -243,21 +387,56 @@ class App:
 
         self._finish_job()
         self._tick_timelapse(now)
+        self._tick_recording(now)
         self.screen.tick(now)
         self._housekeeping(now)
 
+        streaming = self.stream_clients > 0
+        if streaming:
+            self._last_activity = now  # keep the preview running for the phone
+            if not self.screen_on:
+                self._wake()
         if not self.screen_on:
             time.sleep(0.05)
             return
-        if self.screen.wants_preview and not self.busy:
+        if (self.screen.wants_preview or streaming) and not self.busy:
             self._grab_preview()
+            if streaming and now - self._stream_at >= STREAM_INTERVAL_S:
+                self._stream_at = now
+                self._encode_stream()
         else:
             time.sleep(0.04)
         frame = self.screen.render()
         frame = self._draw_toast(frame, now)
-        self.display.show(frame)
+        self.show(frame)
+
+    def show(self, frame: Image.Image) -> None:
+        self.display.show(frame.rotate(180) if self.s.rotate180 else frame)
+
+    def update_keymap(self) -> None:
+        """Physical -> logical buttons for the left-handed / upside-down settings."""
+        m = {b: b for b in "ABXY"}
+        if self.s.rotate180:  # turned round: top-left is now the Y button
+            m = {"A": "Y", "B": "X", "X": "B", "Y": "A"}
+        if self.s.left_handed:  # mirrored: shutter (X) and Y on the left
+            mirror = {"A": "X", "B": "Y", "X": "A", "Y": "B"}
+            m = {phys: mirror[logical] for phys, logical in m.items()}
+        self.keymap = m
+        ui.KEY_LABELS.clear()
+        ui.KEY_LABELS.update({logical: phys for phys, logical in m.items()})
+        ui.MIRRORED = self.s.left_handed
 
     # ---- standby / power -------------------------------------------------
+    def _encode_stream(self) -> None:
+        import io
+
+        img = self.preview_filtered
+        if img is None:
+            return
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=75)
+        self.stream_jpeg = buf.getvalue()
+
     def _step_standby(self, pressed: set, now: float) -> None:
         for ev in self.buttons.update(pressed, now):
             if ev.kind == POWER:
@@ -292,12 +471,15 @@ class App:
             self.toast("Busy - try again", ui.RED, 2)
             return
         log.info("power off")
+        if self.camera.recording:
+            self.stop_recording()
         if self.timelapse:
             self.stop_timelapse()
+        self.cancel_double()
         self.set_magnify(1)
         img, d = ui.panel_screen("omnicam")
         ui.centered(d, 105, "Turning off…", ui.font(18, "bold"))
-        self.display.show(img)
+        self.show(img)
         time.sleep(0.8)
         self.camera.stop()
         self.display.set_backlight(0)
@@ -354,10 +536,12 @@ class App:
         self.screen = screen
 
     def back_to_live(self) -> None:
+        if isinstance(self.screen, PlaybackView):
+            self.screen.stop_video()
         self.screen = self._live
 
     def toast(self, text: str, colour=ui.WHITE, seconds: float = 1.8) -> None:
-        self._toast = (text, colour, self.now() + seconds)
+        self._toast = (ui.keys(text), colour, self.now() + seconds)
 
     def _draw_toast(self, frame: Image.Image, now: float) -> Image.Image:
         if not self._toast:
@@ -382,10 +566,25 @@ class App:
         self._dirty_at = self.now()
 
     def set_setting(self, key: str, value: Any) -> None:
+        if self.camera.recording and key in ("mode", "video_size", "sq_fps", "rotate180"):
+            self.toast("Stop recording first", ui.RED)
+            return
         setattr(self.s, key, value)
         self.mark_dirty()
         if key == "brightness":
             self.display.set_backlight(value / 100)
+        elif key == "long_exposure" and not value:
+            self.s.shutter = min(self.s.shutter, MAX_SHUTTER_S)
+        elif key == "drive" and value != "double":
+            self.cancel_double()
+        elif key in ("left_handed", "rotate180"):
+            self.update_keymap()
+            if key == "rotate180":
+                self.camera.set_rotation(bool(value))
+        elif key == "wifi":
+            self.network.apply(value, self.s.hotspot_password)
+        elif key == "web":
+            self._set_web(bool(value))
         self.camera.apply(self.s)
 
     def step_exposure(self, which: str, direction: int) -> None:
@@ -395,7 +594,8 @@ class App:
             return
         info = self.camera.info
         if which == "shutter":
-            self.s.shutter = step(shutter_steps(info.max_exposure_s), self.s.shutter, direction)
+            self.s.shutter = step(shutter_steps(info.max_exposure_s, self.s.long_exposure),
+                                  self.s.shutter, direction)
         elif which == "iso":
             self.s.iso = step(iso_steps(info.max_gain), self.s.iso, direction)
         elif which == "focus":  # A = closer (more dioptres), B = farther
@@ -472,7 +672,8 @@ class App:
         """Same scene at several exposures: shutter changes first, ISO once the
         shutter reaches its limit. White balance is held for the series."""
         info = self.camera.info
-        max_shutter = min(MAX_SHUTTER_S, info.max_exposure_s)
+        longest = LONG_SHUTTER_S if settings.long_exposure else MAX_SHUTTER_S
+        max_shutter = min(longest, info.max_exposure_s)
         path = thumb = None
         try:
             for ev in offsets:
@@ -484,6 +685,36 @@ class App:
             self.camera.lock(None)
             self.camera.apply(self.s)
         return path, thumb, len(offsets)
+
+    def _night(self, settings: Settings, count: int) -> tuple[Path, Image.Image, int]:
+        """Average `count` frames (aligned) into one photo with less noise."""
+        size = scaled_size(self.camera.info.resolution, settings.image_size)
+        stacker = stack.Stacker()
+        metas: list[FrameMeta] = []
+
+        def add(img: Image.Image, meta: FrameMeta) -> None:
+            stacker.add(img)
+            metas.append(meta)
+
+        self.camera.burst(settings, count, size, on_frame=add, buffers=1)
+        when = datetime.now()
+        path = self.storage.next_photo_path(when)
+        log.info("night: stacked %d frames, crop margin %s", stacker.count, stacker.margin)
+        return path, self._save(stacker.result(), metas[0], path, settings, when), 1
+
+    def _double(self, settings: Settings, first: tuple[Image.Image, FrameMeta]) -> tuple[Path, Image.Image, int]:
+        """Second exposure, blended 50/50 with the first."""
+        size = scaled_size(self.camera.info.resolution, settings.image_size)
+        img, meta = self.camera.capture(settings, None, size)
+        base = first[0] if first[0].size == img.size else first[0].resize(img.size)
+        when = datetime.now()
+        path = self.storage.next_photo_path(when)
+        return path, self._save(Image.blend(base, img, 0.5), meta, path, settings, when), 1
+
+    def cancel_double(self) -> None:
+        if self.double_first is not None:
+            self.double_first = self.double_ghost = None
+            self.toast("Double exposure cancelled")
 
     def _bracket_base(self, settings: Settings) -> Optional[FrameMeta]:
         """Exposure the bracket is centred on: what the photo would get now."""
@@ -505,14 +736,32 @@ class App:
         self.camera.set_zoom(level)
 
     def take_photo(self) -> None:
+        if self.s.video_mode:
+            self.toggle_recording()
+            return
         if self.busy or not self._check_space():
             return
         if self.magnify != 1:  # the magnifier is for focusing; shoot the full frame
             self.set_magnify(1)
         settings = self._snapshot()
         drive = settings.drive
+        expected = settings.exp_shutter if settings.exp_shutter and settings.exp_shutter >= 1 else None
+        kind = "photo"
         try:
-            if drive in BURSTS:
+            if drive in NIGHT_FRAMES:
+                n = NIGHT_FRAMES[drive]
+                fn = lambda: self._night(settings, n)
+                if expected:
+                    expected *= n
+            elif drive == "double":
+                if self.double_first is None:
+                    size = scaled_size(self.camera.info.resolution, settings.image_size)
+                    kind = "double1"
+                    fn = lambda: self.camera.capture(settings, None, size)
+                else:
+                    first = self.double_first
+                    fn = lambda: self._double(settings, first)
+            elif drive in BURSTS:
                 fn = lambda: self._burst(settings, BURSTS[drive])
             elif drive in BRACKETS:
                 base = self._bracket_base(settings)
@@ -527,9 +776,8 @@ class App:
             self.toast(f"Storage error: {e.strerror}", ui.RED)
             return
         self.led((1, 0, 0), None)
-        expected = settings.exp_shutter if settings.exp_shutter and settings.exp_shutter >= 1 else None
         log.info("capture (%s)", drive)
-        self.job = Job("photo", fn, self.now(), expected)
+        self.job = Job(kind, fn, self.now(), expected)
 
     def _finish_job(self) -> None:
         job = self.job
@@ -548,7 +796,17 @@ class App:
                 self.reload_storage()
                 self.back_to_live()
             return
-        if job.kind == "photo":
+        if job.kind == "double1":
+            img, meta = job.result
+            self.double_first = (img, meta)
+            ghost = img.copy()
+            ghost.thumbnail((ui.W, ui.H))
+            self.double_ghost = ghost
+            self.led((0, 1, 0), 0.3)
+            self.toast("First exposure done: shoot the second", ui.ACCENT, 2.5)
+        elif job.kind == "photo":
+            if self.double_first is not None and self.s.drive == "double":
+                self.double_first = self.double_ghost = None
             path, thumb, count = job.result
             log.info("saved %d photo(s), last %s (%d bytes) in %.1fs", count, path,
                      path.stat().st_size, self.now() - job.started)
@@ -589,6 +847,224 @@ class App:
         self.camera.apply(self.s)
         if tl:
             self.toast(message or f"Timelapse stopped: {tl.done} frames", ui.ACCENT, 2.5)
+            if self.s.tl_video and tl.done >= 2:
+                self.make_timelapse_video(tl.directory, self.s.tl_video_fps)
+
+    def make_timelapse_video(self, directory: Path, fps: int) -> None:
+        frames = sorted(directory.glob("FRAME_*.jpg"))
+        dst = directory / f"{directory.name}.mp4"
+
+        def work(progress):
+            codec = video.frames_to_mp4(frames, dst, fps, progress)
+            log.info("timelapse video %s: %d frames at %d fps (%s)", dst, len(frames), fps, codec)
+            return dst
+
+        self.post.add("Timelapse video", work,
+                      lambda _: self.toast("Timelapse video saved", ui.GREEN, 2.5))
+
+    # ---- video ----------------------------------------------------------
+    def toggle_recording(self) -> None:
+        if self.camera.recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self) -> None:
+        if self.busy:
+            return
+        if self.timelapse:
+            self.toast("Timelapse running")
+            return
+        if self.storage.free_bytes() < VIDEO_MIN_FREE * 2:
+            self.toast("Storage full", ui.RED, 3)
+            return
+        if self.magnify != 1:
+            self.set_magnify(1)
+        s = self.s
+        if s.mode == "SQ":
+            size, fps, playback = SQ_SIZE, s.sq_fps, float(SQ_PLAYBACK_FPS)
+        else:
+            w, h, fps = VIDEO_SIZES.get(s.video_size, VIDEO_SIZES["1080p"])
+            size, playback = (w, h), None
+        try:
+            path = self.storage.next_video_path()
+            raw = path.with_suffix(".h264")
+            if self.preview_raw is not None:  # poster frame for playback and the phone page
+                self.storage.save_jpeg(self.preview_raw, path.with_suffix(".THM"), 85)
+            self.camera.start_recording(raw, size, fps, s)
+        except Exception as e:
+            log.exception("recording failed to start")
+            self.toast(f"Video error: {e}"[:40], ui.RED, 3)
+            return
+        self.clip = VideoClip(path, raw, self.now(), playback)
+        self.led((1, 0, 0), None)
+        self.toast("Recording", ui.RED)
+
+    def stop_recording(self, message: str = "") -> None:
+        rec = self.camera.stop_recording()
+        clip, self.clip = self.clip, None
+        self.led((0, 0, 0), 0.01)
+        if clip is None or rec is None:
+            return
+        fps = clip.playback_fps or rec.fps
+        seconds = self.now() - clip.started
+        log.info("recording stopped after %.1f s: %s (%d bytes)", seconds, clip.raw,
+                 clip.raw.stat().st_size if clip.raw.exists() else -1)
+
+        def work(progress):
+            frames = video.remux_h264(clip.raw, clip.path, fps)
+            clip.raw.unlink(missing_ok=True)
+            log.info("video %s: %d frames at %.1f fps", clip.path, frames, fps)
+            return frames
+
+        self.toast(message or "Saving video…", ui.ACCENT, 2)
+        self.post.add("Video", work, lambda _: self.toast(f"Saved {clip.path.name}", ui.GREEN))
+
+    def _tick_recording(self, now: float) -> None:
+        clip = self.clip
+        if clip is None or not self.camera.recording or now - self._clip_check_at < 1.0:
+            return
+        self._clip_check_at = now
+        try:
+            size = clip.raw.stat().st_size
+        except OSError:
+            size = 0
+        if size > VIDEO_MAX_BYTES:
+            self.stop_recording("Video stopped: 4 GB file limit")
+        elif self.storage.free_bytes() < VIDEO_MIN_FREE:
+            self.stop_recording("Video stopped: storage full")
+
+    def video_minutes_left(self) -> int:
+        s = self.s
+        if s.mode == "SQ":
+            w, h, fps = *SQ_SIZE, s.sq_fps
+        else:
+            w, h, fps = VIDEO_SIZES.get(s.video_size, VIDEO_SIZES["1080p"])
+        bytes_per_s = min(17e6, max(4e6, w * h * fps * 0.16)) / 8
+        return int(max(0, self.storage.free_bytes() - VIDEO_MIN_FREE) / bytes_per_s / 60)
+
+    def _finish_post(self) -> None:
+        for label, result, error, on_done in self.post.poll():
+            if error is not None:
+                log.error("%s failed", label, exc_info=error)
+                self.toast(f"{label} failed: {error}"[:40], ui.RED, 3)
+            elif on_done:
+                on_done(result)
+            self.refresh_storage()
+            if isinstance(self.screen, PlaybackView):
+                self.screen.reload()
+
+    # ---- phone page -------------------------------------------------------
+    def _set_web(self, on: bool) -> None:
+        from .web import WebServer
+
+        if on and self.web is None:
+            try:
+                web = WebServer(self, self._web_port, self._web_host)
+                web.start()
+                self.web = web
+            except Exception as e:
+                log.exception("web server")
+                self.toast(f"Phone access failed: {e}"[:40], ui.RED, 3)
+        elif not on and self.web is not None:
+            self.web.stop()
+            self.web = None
+            self.stream_jpeg = None
+
+    @property
+    def web_url(self) -> str:
+        ip = self.network.status.ip
+        if not (self.web and ip):
+            return ""
+        port = "" if self.web.port == 80 else f":{self.web.port}"
+        return f"http://{ip}{port}/"
+
+    def web_command(self, name: str, **kw) -> tuple[bool, str]:
+        """Called from the web server's threads: run on the main loop and wait."""
+        done = threading.Event()
+        box: dict = {}
+        self._web_q.put((name, kw, done, box))
+        if not done.wait(10):
+            return False, "The camera did not respond"
+        return box["result"]
+
+    def _process_web(self) -> None:
+        while True:
+            try:
+                name, kw, done, box = self._web_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                box["result"] = self._web_action(name, **kw)
+            except Exception as e:
+                log.exception("web %s", name)
+                box["result"] = (False, str(e))
+            done.set()
+
+    def _web_action(self, name: str, key: str = "", direction: int = 0) -> tuple[bool, str]:
+        if name == "delete":
+            entry = self.storage.entry(key)
+            if entry is None:
+                return False, "Not found"
+            if self.clip and entry.video == self.clip.path:
+                return False, "Still recording"
+            self.storage.delete(entry)
+            self.refresh_storage()
+            if isinstance(self.screen, PlaybackView):
+                self.screen.reload()
+            log.info("web: deleted %s", key)
+            return True, "Deleted"
+        if not self.powered:
+            return False, "The camera is off (hold Y for 3 s)"
+        if isinstance(self.screen, ExportView):
+            return False, "USB export is on"
+        if name == "ev":
+            if self.s.mode == "M":
+                return False, "No EV in M mode"
+            self.step_exposure("ev", 1 if direction > 0 else -1)
+            return True, "EV " + ui_format_ev(self.s.ev)
+        if name == "shutter":
+            self._last_activity = self.now()
+            if not self.screen_on:
+                self._wake()
+            if self.busy:
+                return False, "Busy"
+            if self.timelapse:
+                return False, "Timelapse running"
+            if self.screen is not self._live:
+                self.back_to_live()
+            if self.s.video_mode:
+                self.toggle_recording()
+                return True, "Recording" if self.camera.recording else "Recording stopped"
+            self.take_photo()
+            return (True, "Shooting…") if self.busy else (False, "Not taken")
+        return False, "Unknown command"
+
+    def web_status(self) -> dict:
+        s = self.s
+        rec = self.clip.started if self.clip else None
+        out = {"powered": self.powered, "mode": s.mode, "recording": rec is not None,
+               "busy": self.busy, "battery": self.battery_state.percent if self.battery_state else None}
+        if not self.powered:
+            out["summary"] = "Camera is off"
+            return out
+        mode = {"MOVIE": "Movie", "SQ": "S&Q"}.get(s.mode, s.mode)
+        parts = [mode]
+        if rec is not None:
+            secs = int(self.now() - rec)
+            parts.append(f"● REC {secs // 60}:{secs % 60:02d}")
+        elif s.video_mode:
+            parts.append(f"{self.video_minutes_left()} min left")
+        else:
+            parts.append(f"{self.shots_left()} shots left")
+        if s.mode != "M":
+            parts.append("EV " + ui_format_ev(s.ev))
+        if self.busy:
+            parts.append("busy")
+        if self.timelapse:
+            parts.append(f"timelapse {self.timelapse.done}")
+        out["summary"] = " · ".join(parts)
+        return out
 
     def _tick_timelapse(self, now: float) -> None:
         tl = self.timelapse
@@ -603,6 +1079,36 @@ class App:
         self.led((1, 0, 0), None)
         log.info("timelapse frame -> %s", path)
         self.job = Job("frame", lambda: self._capture_to(path, settings), now)
+
+    # ---- custom sets ------------------------------------------------------
+    def save_custom(self, n: int) -> None:
+        from .menu import CUSTOM_KEYS
+
+        setattr(self.s, f"custom{n}", {k: getattr(self.s, k) for k in CUSTOM_KEYS})
+        self.mark_dirty()
+        log.info("saved custom %d", n)
+        self.toast(f"Saved as Custom {n}", ui.GREEN)
+
+    def recall_custom(self, n: int) -> None:
+        saved = getattr(self.s, f"custom{n}")
+        if not saved:
+            self.toast(f"Custom {n} is empty: save it first", ui.RED, 2.5)
+            return
+        if self.camera.recording:
+            self.toast("Stop recording first", ui.RED)
+            return
+        valid = {f for f in vars(Settings())}
+        for k, v in saved.items():
+            if k in valid:
+                setattr(self.s, k, v)
+        if not self.s.long_exposure:
+            self.s.shutter = min(self.s.shutter, MAX_SHUTTER_S)
+        if self.s.drive != "double":
+            self.double_first = self.double_ghost = None
+        self.mark_dirty()
+        self.camera.apply(self.s)
+        log.info("recalled custom %d", n)
+        self.toast(f"Custom {n} recalled", ui.GREEN)
 
     # ---- menu actions -------------------------------------------------
     def run_function(self, long: bool = False) -> None:
@@ -627,6 +1133,9 @@ class App:
         if fn == "playback":
             self.open(PlaybackView(self))
         elif fn == "magnify":
+            if self.camera.recording:
+                self.toast("Not while recording")
+                return
             level = {1: 2, 2: 4}.get(self.magnify, 1)
             self.set_magnify(level)
             self.toast(f"Magnify {level}×", ui.ACCENT)
@@ -635,6 +1144,13 @@ class App:
             self.toast(f"Highlight warning {'on' if self.s.zebras else 'off'}", ui.ACCENT)
         elif fn == "usb_export":
             self.run_action("usb_export")
+        elif fn in ("custom1", "custom2"):
+            self.recall_custom(int(fn[-1]))
+        elif fn == "web":
+            self.set_setting("web", not self.s.web)
+            self.toast(f"Phone access {'on' if self.s.web else 'off'}", ui.ACCENT)
+        elif fn == "wifi_info":
+            self.open(ConnectionView(self))
         elif fn == "timelapse":
             if self.timelapse:
                 self.stop_timelapse()
@@ -667,10 +1183,18 @@ class App:
                      f"Entries: {len(self.storage.entries())}",
                      f"About {self.shots_left()} shots left"]
             self.open(InfoView(self, "Storage", lines, back=menu))
+        elif action == "datetime":
+            self.open(DateTimeView(self, back=menu))
+        elif action == "wifi_info":
+            self.open(ConnectionView(self, back=menu))
+        elif action in ("save1", "save2"):
+            self.save_custom(int(action[-1]))
+        elif action in ("recall1", "recall2"):
+            self.recall_custom(int(action[-1]))
         elif action == "camera_info":
             i = self.camera.info
             mp = i.resolution[0] * i.resolution[1] / 1e6
-            shutters = shutter_steps(i.max_exposure_s)
+            shutters = shutter_steps(i.max_exposure_s, long=True)
             lines = [f"App: omnicam {__version__}",
                      f"Model: {sysinfo.board_model()}",
                      f"CPU: {sysinfo.processor()}",
@@ -707,6 +1231,9 @@ class App:
         self.refresh_storage()
 
     def start_export(self) -> None:
+        if self.camera.recording or self.post.busy:
+            self.toast("Wait for the video to finish", ui.RED, 2.5)
+            return
         log.info("USB export: start")
         self.open(ExportView(self))
         self.job = Job("export_start", lambda: self.system.usb_export_start(
@@ -726,11 +1253,26 @@ class App:
         self.job = Job("export_stop", lambda: self.system.usb_export_stop(
             self.storage.requested, self.photo_image), self.now(), on_done=done)
 
+    def set_clock(self, when: datetime) -> None:
+        try:
+            self.system.set_time(when)
+        except Exception as e:
+            log.error("setting the clock failed: %s", e)
+            self.toast(f"Clock not set: {e}"[:40], ui.RED, 3)
+            return
+        log.info("clock set to %s", when.isoformat(sep=" "))
+        self.refresh_storage()
+        self.toast(f"Clock set: {when:%Y-%m-%d %H:%M}", ui.GREEN)
+
     def _reset_settings(self) -> None:
-        keep = {"photo_dir": self.s.photo_dir}
+        keep = {k: getattr(self.s, k) for k in
+                ("photo_dir", "custom1", "custom2", "hotspot_password", "wifi", "web")}
         for k, v in vars(Settings(**keep)).items():
             setattr(self.s, k, v)  # in place: screens hold a reference to self.s
         self.set_magnify(1)
+        self.cancel_double()
+        self.update_keymap()
+        self.camera.set_rotation(self.s.rotate180)
         self.camera.apply(self.s)
         self.display.set_backlight(self.s.brightness / 100)
         self.mark_dirty()
@@ -741,6 +1283,10 @@ class App:
     def _erase(self) -> None:
         import shutil
 
+        if self.camera.recording or self.post.busy:
+            self.toast("Wait for the video to finish", ui.RED, 2.5)
+            self.back_to_live()
+            return
         self.open(BusyView(self, "Erasing"))
 
         def done():
@@ -754,7 +1300,7 @@ class App:
     def _shutdown(self) -> None:
         img, d = ui.panel_screen("Goodbye")
         ui.centered(d, 105, "Shutting down…", ui.font(18, "bold"))
-        self.display.show(img)
+        self.show(img)
         self.running = False
         self.s.save(self.settings_path)
         self._dirty_at = None

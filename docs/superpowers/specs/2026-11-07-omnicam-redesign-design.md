@@ -143,6 +143,13 @@ settings, Shut down).
 Power hold (revised): holding Y 3 s turns the camera off only from the live
 view; on other screens it is ignored. Turning on from standby is unchanged.
 
+Date & time (added): SETUP › Date & time sets the system clock (`date -s`,
+service runs as root) field by field (Y next/save, A/B −/+, X cancel), then
+touches systemd-timesyncd's clock file and runs `fake-hwclock save` (if present)
+so the time survives a reboot without network. Shows whether NTP is synced.
+SETUP is now: B press, B hold, Date & time, Display › (Brightness, Screen off),
+Storage ›, About ›. Time zone setting: not included.
+
 ## Builder's calls
 
 - Filters: None, B&W, Sepia, High Contrast, Vivid, Cool, Warm, Vintage.

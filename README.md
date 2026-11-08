@@ -43,6 +43,7 @@ focus aids, filters, timelapse, on-camera playback, and USB export of your photo
 | <img src="docs/screenshots/menu-edit.png" width="260"><br>In-place editing with help line | <img src="docs/screenshots/menu-picker.png" width="260"><br>Picker for long lists | <img src="docs/screenshots/menu-setup.png" width="260"><br>SETUP tab |
 | <img src="docs/screenshots/focus-aids.png" width="260"><br>Peaking, zebras, 16:9 guides, diagonals | <img src="docs/screenshots/magnify.png" width="260"><br>Focus magnifier 2× | <img src="docs/screenshots/review.png" width="260"><br>Review after a shot (Vintage filter) |
 | <img src="docs/screenshots/playback.png" width="260"><br>Playback | <img src="docs/screenshots/timelapse.png" width="260"><br>Timelapse running | <img src="docs/screenshots/usb-export.png" width="260"><br>USB export |
+| <img src="docs/screenshots/date-time.png" width="260"><br>Setting the date and time | <img src="docs/screenshots/camera-info.png" width="260"><br>Camera info | |
 
 ## Hardware
 
@@ -152,14 +153,14 @@ menu, **hold A** opens the full menu. It reopens on the tile you used last.
 | **STYLE** | Sharpness, Contrast, Saturation, Noise reduction |
 | **FOCUS** | Focus mode, Focus peaking, Highlight warning, Grid, Histogram |
 | **TL** | Interval, Shots, Exposure lock, Start timelapse |
-| **SETUP** | B press, B hold, Brightness, Screen off, **Storage ›** (Playback, USB export, Storage info, Erase all photos), **About ›** (Camera info, Reset settings, Shut down) |
+| **SETUP** | B press, B hold, Date & time, **Display ›** (Brightness, Screen off), **Storage ›** (Playback, USB export, Storage info, Erase all photos), **About ›** (Camera info, Reset settings, Shut down) |
 
 - **A / B** move through the items; past the end of a tab you continue into the
   next one. **Hold A / B** to jump a whole tab.
 - **Y** on a setting: On/Off settings flip; short lists change in place
   (`◀ value ▶`, arrows turn grey at the ends; **Y** keeps, **X** cancels); long
   lists (Filter, Interval, Shots, B press/hold) open a picker.
-- **Y** on an action runs it; on *Storage* / *About* it opens that page.
+- **Y** on an action runs it; on *Display* / *Storage* / *About* it opens that page.
 - **X** goes back. The help line at the bottom explains the highlighted item or
   value. The menu reopens where you left it.
 
@@ -174,6 +175,17 @@ Highlight warning, Histogram (on/off), Timelapse start/stop, USB export — and
 
 The **magnifier** crops the live view on the sensor (so it stays sharp) to check
 focus, and returns to 1× when you take the photo.
+
+### Date and time
+
+The Pi has no clock battery: without a network it can't get the time, so photo
+dates and folder names would be wrong. **Menu › SETUP › Date & time** sets the
+clock: **A / B** change the highlighted field (hold to repeat), **Y** moves
+year → month → day → hour → minute and saves on the last field, **X** cancels.
+Seconds are set to 00. The screen says whether the clock is currently synced
+from the network; when the camera is online, network time takes over again. The
+time is also recorded where the OS restores the clock from at boot, so after a
+reboot without network it continues from roughly where it was.
 
 ### Playback
 

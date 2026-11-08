@@ -264,7 +264,52 @@ def panel_screen(title: str) -> tuple[Image.Image, ImageDraw.ImageDraw]:
     return img, d
 
 
+# Button letters as printed on the HAT, for each logical button; changed by the
+# left-handed / upside-down settings (see App.update_keymap). MIRRORED: the
+# A/B buttons are on the right, so hints for them go on the right.
+KEY_LABELS: dict[str, str] = {}
+MIRRORED = False
+_KEY_RE = None
+
+
+def keys(text: str) -> str:
+    """Rewrite button letters in a help/hint text for the current button layout."""
+    global _KEY_RE
+    if not KEY_LABELS or all(k == v for k, v in KEY_LABELS.items()):
+        return text
+    if _KEY_RE is None:
+        import re
+
+        _KEY_RE = re.compile(r"(?<![A-Za-z0-9&])([ABXY])(?![A-Za-z0-9&])")
+    return _KEY_RE.sub(lambda m: KEY_LABELS.get(m[1], m[1]), text)
+
+
+def qr(d: ImageDraw.ImageDraw, text: str, x: int, y: int, size: int) -> bool:
+    """Draw a QR code (white quiet zone) in a size x size square. False if segno is missing."""
+    try:
+        import segno
+    except ImportError:
+        return False
+    code = segno.make(text, error="m")
+    rows = [list(r) for r in code.matrix]
+    n = len(rows) + 4  # quiet zone of 2 modules each side
+    cell = max(1, size // n)
+    side = cell * n
+    x += (size - side) // 2
+    y += (size - side) // 2
+    d.rectangle([x, y, x + side - 1, y + side - 1], fill=WHITE)
+    for r, row in enumerate(rows):
+        for c, v in enumerate(row):
+            if v:
+                px, py = x + (c + 2) * cell, y + (r + 2) * cell
+                d.rectangle([px, py, px + cell - 1, py + cell - 1], fill=(0, 0, 0))
+    return True
+
+
 def hints(d: ImageDraw.ImageDraw, left: str, right: str) -> None:
+    left, right = keys(left), keys(right)
+    if MIRRORED:
+        left, right = right, left
     f = font(11)
     d.rectangle([0, H - 18, W, H], fill=(40, 40, 46))
     d.text((6, H - 16), left, font=f, fill=GREY)
